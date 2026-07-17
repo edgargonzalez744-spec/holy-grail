@@ -108,6 +108,7 @@
       <section id="now" class="now hidden" aria-label="Now playing">
         <div id="nowBg" class="now-bg"></div>
         <div class="now-inner">
+          <div class="grabber" id="grabber"></div>
           <button id="nowClose" class="now-close" aria-label="Close player">
             <svg viewBox="0 0 24 24" width="26" height="26"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
           </button>
@@ -131,7 +132,20 @@
               <svg viewBox="0 0 24 24" width="26" height="26"><path fill="currentColor" d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
             </button>
           </div>
-          <div class="extra"><button id="speedBtn" class="pill">1×</button></div>
+          <div class="extra">
+            <button id="favBtn" class="pill pill-ic" aria-label="Favorite"></button>
+            <button id="speedBtn" class="pill">1×</button>
+            <button id="sleepBtn" class="pill pill-ic" aria-label="Sleep timer"></button>
+          </div>
+          <div id="sleepMenu" class="sleep-menu hidden">
+            <div class="sleep-title">Sleep timer</div>
+            <div class="sleep-opt" data-min="15">15 minutes</div>
+            <div class="sleep-opt" data-min="30">30 minutes</div>
+            <div class="sleep-opt" data-min="45">45 minutes</div>
+            <div class="sleep-opt" data-min="60">1 hour</div>
+            <div class="sleep-opt" data-min="end">End of talk</div>
+            <div class="sleep-opt sleep-off" data-min="0">Off</div>
+          </div>
         </div>
       </section>
     </div>

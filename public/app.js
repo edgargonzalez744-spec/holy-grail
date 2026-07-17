@@ -10,7 +10,7 @@ const state = {
   appTitle: 'Holy Grail',
   recentDays: 30,
   tabs: [],            // [{key, label}]
-  activeTab: 'recent',
+  activeTab: 'listen',
   view: 'home',        // home | search | speaker
   currentTrack: null,
   queue: [],
@@ -43,6 +43,38 @@ function loadPos(id) { const v = Number(localStorage.getItem(posKey(id))); retur
 function cacheDur(id, d) { try { localStorage.setItem(durKey(id), String(Math.round(d))); } catch (e) {} }
 function cachedDur(id) { const v = Number(localStorage.getItem(durKey(id))); return isFinite(v) && v > 0 ? v : null; }
 
+// ---------------------------------------------------------------------------
+// Play history (Continue Listening) + Favorites
+// ---------------------------------------------------------------------------
+const RECENT_KEY = 'tp_recent', FAV_KEY = 'tp_favs';
+function readJson(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch (e) { return []; } }
+function writeJson(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function slimTrack(t) { return { id: t.id, title: t.title, speaker: t.speaker, group: t.group, set: t.set, duration: t.duration }; }
+function recordPlay(t) {
+  const list = readJson(RECENT_KEY).filter((x) => x.id !== t.id);
+  list.unshift(slimTrack(t));
+  writeJson(RECENT_KEY, list.slice(0, 40));
+}
+function getContinue() {
+  return readJson(RECENT_KEY)
+    .map((x) => ({ ...x, pos: loadPos(x.id), dur: cachedDur(x.id) || x.duration || 0 }))
+    .filter((x) => x.pos > 15 && (!x.dur || x.pos < x.dur - 20))
+    .slice(0, 12);
+}
+function getFavs() { return readJson(FAV_KEY); }
+function isFav(id) { return readJson(FAV_KEY).some((x) => x.id === id); }
+function toggleFav(t) {
+  let list = readJson(FAV_KEY);
+  const on = list.some((x) => x.id === t.id);
+  list = on ? list.filter((x) => x.id !== t.id) : [slimTrack(t), ...list];
+  writeJson(FAV_KEY, list);
+  return !on;
+}
+
+const HEART = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
+const HEART_FILL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
+const MOON_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 12.9A9 9 0 1 1 11.1 3a7 7 0 0 0 9.9 9.9z"/></svg>';
+
 function showView(name) {
   state.view = name;
   $('home').classList.toggle('hidden', name !== 'home');
@@ -64,11 +96,13 @@ async function loadTabs() {
   }
   $('indexing').classList.add('hidden');
   state.recentDays = data.recentDays;
-  state.tabs = [{ key: 'recent', label: 'Recently Added' }].concat(
-    data.groups.map((g) => ({ key: 'group:' + g.name, label: g.name }))
-  );
-  // Don't land on "Recently Added" if nothing's been added lately — open the first group instead.
-  if (state.activeTab === 'recent' && data.recentCount === 0 && data.groups.length)
+  state.recentCount = data.recentCount;
+  state.tabs = [
+    { key: 'listen', label: 'Listen Now' },
+    { key: 'favorites', label: 'Favorites' },
+  ].concat(data.groups.map((g) => ({ key: 'group:' + g.name, label: g.name })));
+  // Land on Listen Now only if it has something to show; otherwise open the first group.
+  if (state.activeTab === 'listen' && !getContinue().length && data.recentCount === 0 && data.groups.length)
     state.activeTab = 'group:' + data.groups[0].name;
   renderTabs();
   selectTab(state.activeTab);
@@ -86,23 +120,52 @@ function selectTab(key) {
   $('searchInput').value = '';
   renderTabs();
   showView('home');
-  if (key === 'recent') loadRecent();
+  if (key === 'listen') loadListenNow();
+  else if (key === 'favorites') loadFavorites();
   else loadGroup(key.slice('group:'.length));
 }
 
-async function loadRecent() {
-  $('homeContent').innerHTML = '<div class="section-title">Loading…</div>';
-  let data;
-  try { data = await (await fetch('/api/recent?days=' + state.recentDays)).json(); } catch (e) { return; }
-  if (!data.talks.length) {
-    $('homeContent').innerHTML = `<div class="empty"><p>Nothing added in the last ${data.days} days.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">New talks you add to your Drive folder will show up here.</p></div>`;
+function continueCard(t, i) {
+  const dur = t.dur || t.duration || cachedDur(t.id) || 0;
+  const pct = dur ? Math.min(100, Math.round((t.pos / dur) * 100)) : 0;
+  const left = dur ? Math.max(0, dur - t.pos) : 0;
+  return `
+  <div class="ccard" data-i="${i}">
+    <div class="ccard-art" style="background:${grad(t.speaker || t.group)}">${escapeHtml(initials(t.speaker || t.title))}
+      <div class="ccard-prog"><span style="width:${pct}%"></span></div>
+    </div>
+    <div class="ccard-title">${escapeHtml(t.title)}</div>
+    <div class="ccard-sub">${left ? fmtTime(left) + ' left' : escapeHtml(t.speaker || '')}</div>
+  </div>`;
+}
+
+async function loadListenNow() {
+  const cont = getContinue();
+  let recent = [];
+  try { recent = (await (await fetch('/api/recent?days=' + state.recentDays)).json()).talks; } catch (e) {}
+  let html = '';
+  if (cont.length)
+    html += `<div class="section-title">Continue listening</div><div class="shelf" id="contShelf">${cont.map(continueCard).join('')}</div>`;
+  if (recent.length)
+    html += `<div class="section-title">Recently added</div><div class="talks" id="recentTalks">${recent.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
+  if (!cont.length && !recent.length)
+    html = `<div class="empty"><p>Play a talk and it’ll appear here to pick up where you left off.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">New talks added to your Drive folder show up under Recently added.</p></div>`;
+  $('homeContent').innerHTML = html;
+  if (cont.length)
+    document.querySelectorAll('#contShelf .ccard').forEach((el) =>
+      el.addEventListener('click', () => playFromQueue(cont, Number(el.dataset.i)))
+    );
+  if (recent.length) bindTalkRows(document.getElementById('recentTalks'), recent);
+}
+
+function loadFavorites() {
+  const favs = getFavs();
+  if (!favs.length) {
+    $('homeContent').innerHTML = `<div class="empty"><p>No favorites yet.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">Tap the ♥ in the player to save a talk here.</p></div>`;
     return;
   }
-  const rows = data.talks
-    .map((t, i) => talkRowHtml(t, i, true))
-    .join('');
-  $('homeContent').innerHTML = `<div class="section-title">Added in the last ${data.days} days · ${data.talks.length}</div><div class="talks">${rows}</div>`;
-  bindTalkRows($('homeContent'), data.talks);
+  $('homeContent').innerHTML = `<div class="section-title">Favorites · ${favs.length}</div><div class="talks" id="favTalks">${favs.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
+  bindTalkRows(document.getElementById('favTalks'), favs);
 }
 
 async function loadGroup(name) {
@@ -253,6 +316,7 @@ function playTrack(t) {
   }
   audio.playbackRate = state.speeds[state.speedIdx];
   audio.play().catch(() => {});
+  recordPlay(t);
   paintNowPlaying(t);
   openNow();
   setMediaSession(t);
@@ -262,11 +326,32 @@ function paintNowPlaying(t) {
   const g = grad(t.speaker || t.group || '');
   const sub = t.speaker && t.speaker !== t.group ? `${t.speaker} · ${t.group}` : t.group;
   $('nowArt').style.background = g; $('nowArt').textContent = initials(t.speaker || t.title);
+  $('nowArt').classList.toggle('paused', audio.paused);
   $('nowBg').style.background = g;
-  $('nowTitle').textContent = t.title; $('nowSpeaker').textContent = sub;
+  $('nowTitle').innerHTML = `<span class="mqt">${escapeHtml(t.title)}</span>`;
+  $('nowSpeaker').textContent = sub;
+  setFavIcon(isFav(t.id));
+  requestAnimationFrame(setupMarquee);
   $('miniArt').style.background = g; $('miniArt').textContent = initials(t.speaker || t.title);
   $('miniTitle').textContent = t.title; $('miniSpeaker').textContent = sub;
   $('mini').classList.remove('hidden');
+}
+
+function setFavIcon(on) {
+  $('favBtn').innerHTML = on ? HEART_FILL : HEART;
+  $('favBtn').classList.toggle('on', on);
+}
+function setupMarquee() {
+  const h = $('nowTitle'), s = h.querySelector('.mqt');
+  if (!s) return;
+  const over = s.scrollWidth - h.clientWidth;
+  if (over > 6) {
+    s.style.setProperty('--sh', -(over + 14) + 'px');
+    s.style.setProperty('--d', Math.max(6, (over + 14) / 26) + 's');
+    s.classList.add('run');
+  } else {
+    s.classList.remove('run');
+  }
 }
 function refreshActive() {
   document.querySelectorAll('.track').forEach((el) => el.classList.remove('active'));
@@ -281,7 +366,7 @@ function updatePlayIcons() {
     ? '<svg class="play-svg" viewBox="0 0 24 24" style="width:22px;height:22px"><path d="M8 5v14l11-7z"/></svg>'
     : '<svg class="play-svg" viewBox="0 0 24 24" style="width:22px;height:22px"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
 }
-function openNow() { $('now').classList.remove('hidden', 'closing'); }
+function openNow() { $('now').style.transform = ''; $('now').classList.remove('hidden', 'closing'); }
 function closeNow() { $('now').classList.add('closing'); setTimeout(() => $('now').classList.add('hidden'), 380); }
 
 // ---------------------------------------------------------------------------
@@ -295,10 +380,15 @@ audio.addEventListener('timeupdate', () => {
   $('cur').textContent = fmtTime(c);
   if (d) { $('seek').value = String(Math.round((c / d) * 1000)); $('miniProgress').firstElementChild.style.width = (c / d) * 100 + '%'; }
   if (state.currentTrack && c > 0) savePos(state.currentTrack.id, c);
+  if (sleep.endAt) updateSleepBtn();
 });
-audio.addEventListener('play', () => { updatePlayIcons(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
-audio.addEventListener('pause', () => { updatePlayIcons(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
-audio.addEventListener('ended', () => { if (state.currentTrack) savePos(state.currentTrack.id, 0); playNext(); });
+audio.addEventListener('play', () => { updatePlayIcons(); $('nowArt').classList.remove('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+audio.addEventListener('pause', () => { updatePlayIcons(); $('nowArt').classList.add('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+audio.addEventListener('ended', () => {
+  if (state.currentTrack) savePos(state.currentTrack.id, 0);
+  if (sleep.endOfTalk) { clearSleep(); return; } // stop the chain when "end of talk" timer is set
+  playNext();
+});
 
 // ---------------------------------------------------------------------------
 // Controls
@@ -323,6 +413,63 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'ArrowLeft') audio.currentTime = Math.max(0, audio.currentTime - 15);
   else if (e.code === 'ArrowRight') audio.currentTime += 30;
 });
+
+// ---------------------------------------------------------------------------
+// Favorites button, sleep timer, swipe-to-dismiss
+// ---------------------------------------------------------------------------
+$('favBtn').addEventListener('click', () => {
+  if (!state.currentTrack) return;
+  setFavIcon(toggleFav(state.currentTrack));
+  if (state.view === 'home' && state.activeTab === 'favorites') loadFavorites();
+});
+
+const sleep = { timer: null, endAt: null, endOfTalk: false };
+function clearSleep() { clearTimeout(sleep.timer); sleep.timer = null; sleep.endAt = null; sleep.endOfTalk = false; updateSleepBtn(); }
+function setSleep(val) {
+  clearTimeout(sleep.timer); sleep.timer = null; sleep.endAt = null; sleep.endOfTalk = false;
+  if (val === 'end') sleep.endOfTalk = true;
+  else { const m = Number(val); if (m > 0) { sleep.endAt = Date.now() + m * 60000; sleep.timer = setTimeout(() => { audio.pause(); clearSleep(); }, m * 60000); } }
+  updateSleepBtn();
+}
+function updateSleepBtn() {
+  const b = $('sleepBtn');
+  if (sleep.endAt) { const m = Math.max(1, Math.round((sleep.endAt - Date.now()) / 60000)); b.innerHTML = MOON_IC + '<span style="margin-left:5px">' + m + 'm</span>'; b.classList.add('on'); }
+  else if (sleep.endOfTalk) { b.innerHTML = MOON_IC + '<span style="margin-left:5px">end</span>'; b.classList.add('on'); }
+  else { b.innerHTML = MOON_IC; b.classList.remove('on'); }
+}
+$('sleepBtn').addEventListener('click', (e) => { e.stopPropagation(); $('sleepMenu').classList.toggle('hidden'); });
+$('sleepMenu').querySelectorAll('.sleep-opt').forEach((el) =>
+  el.addEventListener('click', () => { setSleep(el.dataset.min); $('sleepMenu').classList.add('hidden'); })
+);
+$('now').addEventListener('click', (e) => {
+  if (!$('sleepMenu').classList.contains('hidden') && !e.target.closest('#sleepMenu') && !e.target.closest('#sleepBtn'))
+    $('sleepMenu').classList.add('hidden');
+});
+
+let drag = { y0: null, on: false };
+function dragStart(e) { drag.y0 = e.touches ? e.touches[0].clientY : e.clientY; drag.on = true; $('now').style.transition = 'none'; }
+function dragMove(e) { if (!drag.on) return; const y = e.touches ? e.touches[0].clientY : e.clientY; const dy = y - drag.y0; if (dy > 0) $('now').style.transform = 'translateY(' + dy + 'px)'; }
+function dragEnd(e) {
+  if (!drag.on) return; drag.on = false;
+  const y = e.changedTouches ? e.changedTouches[0].clientY : e.clientY; const dy = y - drag.y0;
+  $('now').style.transition = '';
+  if (dy > 110) {
+    $('now').style.transform = 'translateY(100%)';
+    setTimeout(() => { $('now').classList.add('hidden'); $('now').style.transform = ''; }, 380);
+  } else {
+    $('now').style.transform = 'translateY(0)';
+    setTimeout(() => { $('now').style.transform = ''; }, 260);
+  }
+}
+['grabber', 'nowArt'].forEach((id) => {
+  const el = $(id);
+  el.addEventListener('touchstart', dragStart, { passive: true });
+  el.addEventListener('touchmove', dragMove, { passive: true });
+  el.addEventListener('touchend', dragEnd);
+  el.addEventListener('mousedown', dragStart);
+});
+document.addEventListener('mousemove', dragMove);
+document.addEventListener('mouseup', dragEnd);
 
 function setMediaSession(t) {
   if (!('mediaSession' in navigator)) return;
@@ -368,6 +515,8 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
 async function boot() {
   updatePlayIcons();
   applyTheme();
+  setFavIcon(false);
+  updateSleepBtn();
   let cfg = { title: 'Holy Grail', gated: false, authed: true };
   try { cfg = await (await fetch('/api/config')).json(); } catch (e) {}
   state.appTitle = cfg.title;
