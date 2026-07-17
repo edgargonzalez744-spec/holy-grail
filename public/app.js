@@ -336,10 +336,38 @@ function setMediaSession(t) {
 }
 
 // ---------------------------------------------------------------------------
+// Theme (light / dark, follows system unless overridden)
+// ---------------------------------------------------------------------------
+const SUN = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>';
+const MOON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 12.9A9 9 0 1 1 11.1 3a7 7 0 0 0 9.9 9.9z"/></svg>';
+function effectiveTheme() {
+  const t = localStorage.getItem('tp_theme');
+  if (t === 'light' || t === 'dark') return t;
+  return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+function applyTheme() {
+  const eff = effectiveTheme();
+  const mc = document.querySelector('meta[name="theme-color"]');
+  if (mc) mc.setAttribute('content', eff === 'light' ? '#f4f4f7' : '#0a0a0c');
+  $('themeToggle').innerHTML = eff === 'light' ? MOON : SUN;
+}
+$('themeToggle').addEventListener('click', () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('tp_theme', next);
+  document.documentElement.setAttribute('data-theme', next);
+  applyTheme();
+});
+// React to system changes when the user hasn't chosen manually.
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  if (!localStorage.getItem('tp_theme')) applyTheme();
+});
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 async function boot() {
   updatePlayIcons();
+  applyTheme();
   let cfg = { title: 'Holy Grail', gated: false, authed: true };
   try { cfg = await (await fetch('/api/config')).json(); } catch (e) {}
   state.appTitle = cfg.title;
