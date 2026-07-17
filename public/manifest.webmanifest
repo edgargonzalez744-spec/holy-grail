@@ -1,0 +1,14 @@
+{
+  "name": "Holy Grail",
+  "short_name": "Holy Grail",
+  "description": "Motivation talks library",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon.svg", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
