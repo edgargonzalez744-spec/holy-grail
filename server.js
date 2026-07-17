@@ -5,13 +5,13 @@ require('dotenv').config();
 /**
  * Talks Player — a single Node service that:
  *   1. Serves the premium frontend (public/)
- *   2. Recursively indexes audio files from a designated Google Drive folder,
- *      grouping them into albums (immediate parent folder) and sections
- *      (top-level group under the root).
+ *   2. Recursively indexes audio from a designated Google Drive folder,
+ *      grouping into Group -> Speaker -> Talk (matching the Drive layout:
+ *      Talks / <Group> / <Speaker> / <Set> / NN Track.mp3)
  *   3. Streams each file with HTTP Range support (instant seeking on long tracks)
  *
- * Auth to Drive is via a service account (no user ever signs into Google).
- * Access to the app is gated by an optional shared passcode (signed cookie).
+ * Auth to Drive is via a service account. App access is gated by an optional
+ * shared passcode (signed cookie).
  */
 
 const path = require('path');
@@ -23,12 +23,14 @@ const { google } = require('googleapis');
 
 const PORT = process.env.PORT || 3000;
 const FOLDER_ID = process.env.DRIVE_FOLDER_ID || '';
-const APP_PASSCODE = process.env.APP_PASSCODE || ''; // empty => no gate (open)
+const APP_PASSCODE = process.env.APP_PASSCODE || '';
 const APP_TITLE = process.env.APP_TITLE || 'Talks';
-const SESSION_SECRET =
-  process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const RECENT_DAYS = Number(process.env.RECENT_DAYS || 30);
 
 const AUDIO_RE = /(^audio\/)|(video\/mp4)|(mpeg)/i;
+// Groups shown first, in this order; any others appended after.
+const PREFERRED_GROUPS = ['BWW', 'Amway', 'WWDB', 'Yager Group', 'Day One'];
 
 // ---------------------------------------------------------------------------
 // Google Drive client (service account)
@@ -49,9 +51,7 @@ function initDrive() {
     console.error('[drive] GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON:', err.message);
     return;
   }
-  if (credentials.private_key) {
-    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
-  }
+  if (credentials.private_key) credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
   auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/drive.readonly'],
@@ -68,14 +68,15 @@ const index = {
   status: 'idle', // idle | building | ready | error
   builtAt: null,
   error: null,
-  albums: new Map(), // albumId -> { id, name, section, path, tracks: [] }
-  tracksById: new Map(), // trackId -> track
-  order: [], // album ids in display order
+  tracksById: new Map(),
+  groups: new Map(), // groupName -> { name, speakers: Map(speakerName -> track[]) }
+  groupOrder: [],
+  recent: [], // tracks sorted by createdTime desc
 };
 
 function cleanTitle(name) {
-  let t = name.replace(/\.[^./\\]+$/, '').trim(); // strip extension
-  const m = t.match(/^(\d{1,3})[\s._-]+(.*)$/); // leading track number
+  let t = name.replace(/\.[^./\\]+$/, '').trim();
+  const m = t.match(/^(\d{1,3})[\s._-]+(.*)$/);
   let trackNo = null;
   if (m) {
     trackNo = Number(m[1]);
@@ -84,7 +85,6 @@ function cleanTitle(name) {
   return { title: t || name, trackNo };
 }
 
-// Simple concurrency pool for the recursive walk.
 async function buildIndex() {
   if (!drive || !FOLDER_ID) {
     index.status = 'error';
@@ -96,10 +96,9 @@ async function buildIndex() {
   console.log('[index] building…');
   const t0 = Date.now();
 
-  const albums = new Map();
   const tracksById = new Map();
+  const groups = new Map();
 
-  // Each work item is a folder to list, carrying its path chain [{id,name}].
   const queue = [{ id: FOLDER_ID, chain: [] }];
   const CONCURRENCY = 8;
   let active = 0;
@@ -111,7 +110,7 @@ async function buildIndex() {
       const { data } = await drive.files.list({
         q: `'${item.id}' in parents and trashed = false`,
         fields:
-          'nextPageToken, files(id, name, mimeType, size, modifiedTime, videoMediaMetadata(durationMillis))',
+          'nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, videoMediaMetadata(durationMillis))',
         pageSize: 1000,
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
@@ -119,24 +118,22 @@ async function buildIndex() {
       });
       for (const f of data.files || []) {
         if (f.mimeType === 'application/vnd.google-apps.folder') {
-          queue.push({ id: f.id, chain: item.chain.concat({ id: f.id, name: f.name }) });
+          queue.push({ id: f.id, chain: item.chain.concat(f.name) });
         } else if (AUDIO_RE.test(f.mimeType || '')) {
-          addTrack(f, item);
+          addTrack(f, item.chain);
         }
       }
       pageToken = data.nextPageToken;
     } while (pageToken);
   }
 
-  function addTrack(f, folder) {
-    const chain = folder.chain;
-    // album = immediate parent folder; section = first meaningful group under root.
-    const album = chain[chain.length - 1] || { id: FOLDER_ID, name: APP_TITLE };
-    // Section: the folder just below the root's "Talks"-style top level.
-    // chain[0] is usually the top folder (e.g. "Talks"); chain[1] is the group.
-    let section = 'Talks';
-    if (chain.length >= 2) section = chain[1].name;
-    else if (chain.length === 1) section = chain[0].name;
+  function addTrack(f, chain) {
+    // chain is folder names from the root folder down, e.g. ["Talks","BWW","Steve Ridley","Set"]
+    let rel = chain.slice();
+    if (rel[0] === 'Talks' || rel[0] === 'Books') rel = rel.slice(1);
+    const group = rel[0] || 'Other';
+    const speaker = rel.length >= 2 ? rel[1] : group; // mid level = speaker (or the group itself)
+    const set = rel[2] || rel[rel.length - 1] || group; // the set/event, for context under a speaker
 
     const { title, trackNo } = cleanTitle(f.name || '');
     const durMs = f.videoMediaMetadata && f.videoMediaMetadata.durationMillis;
@@ -145,25 +142,20 @@ async function buildIndex() {
       title,
       trackNo,
       name: f.name,
-      albumId: album.id,
-      album: album.name,
-      section,
+      group,
+      speaker,
+      set,
       size: f.size ? Number(f.size) : null,
       mimeType: f.mimeType,
-      modifiedTime: f.modifiedTime,
+      createdTime: f.createdTime || null,
+      modifiedTime: f.modifiedTime || null,
       duration: durMs ? Math.round(Number(durMs) / 1000) : null,
     };
     tracksById.set(track.id, track);
-    if (!albums.has(album.id)) {
-      albums.set(album.id, {
-        id: album.id,
-        name: album.name,
-        section,
-        path: chain.map((c) => c.name).join('/'),
-        tracks: [],
-      });
-    }
-    albums.get(album.id).tracks.push(track);
+    if (!groups.has(group)) groups.set(group, { name: group, speakers: new Map() });
+    const g = groups.get(group);
+    if (!g.speakers.has(speaker)) g.speakers.set(speaker, []);
+    g.speakers.get(speaker).push(track);
   }
 
   await new Promise((resolve, reject) => {
@@ -175,84 +167,81 @@ async function buildIndex() {
         listFolder(item)
           .then(() => {
             active--;
-            if (!queue.length && active === 0) {
-              done = true;
-              resolve();
-            } else pump();
+            if (!queue.length && active === 0) { done = true; resolve(); }
+            else pump();
           })
-          .catch((err) => {
-            done = true;
-            reject(err);
-          });
+          .catch((err) => { done = true; reject(err); });
       }
-      if (!queue.length && active === 0 && !done) {
-        done = true;
-        resolve();
-      }
+      if (!queue.length && active === 0 && !done) { done = true; resolve(); }
     }
     pump();
   });
 
-  // Sort tracks within each album (by track number, then name).
-  for (const alb of albums.values()) {
-    alb.tracks.sort((a, b) => {
-      if (a.trackNo != null && b.trackNo != null) return a.trackNo - b.trackNo;
-      if (a.trackNo != null) return -1;
-      if (b.trackNo != null) return 1;
-      return a.name.localeCompare(b.name, undefined, { numeric: true });
-    });
+  // Sort talks within each speaker (by set, then track number, then name).
+  for (const g of groups.values()) {
+    for (const talks of g.speakers.values()) {
+      talks.sort(
+        (a, b) =>
+          a.set.localeCompare(b.set, undefined, { numeric: true }) ||
+          (a.trackNo != null && b.trackNo != null ? a.trackNo - b.trackNo : 0) ||
+          a.name.localeCompare(b.name, undefined, { numeric: true })
+      );
+    }
   }
 
-  // Album display order: by section, then album name.
-  const order = [...albums.values()]
-    .sort(
-      (a, b) =>
-        a.section.localeCompare(b.section) || a.name.localeCompare(b.name, undefined, { numeric: true })
-    )
-    .map((a) => a.id);
+  // Group display order: preferred first, then the rest by track count.
+  const groupList = [...groups.keys()];
+  const groupOrder = [
+    ...PREFERRED_GROUPS.filter((g) => groups.has(g)),
+    ...groupList
+      .filter((g) => !PREFERRED_GROUPS.includes(g))
+      .sort((a, b) => trackCount(groups.get(b)) - trackCount(groups.get(a))),
+  ];
 
-  index.albums = albums;
+  const recent = [...tracksById.values()]
+    .filter((t) => t.createdTime)
+    .sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
+
   index.tracksById = tracksById;
-  index.order = order;
+  index.groups = groups;
+  index.groupOrder = groupOrder;
+  index.recent = recent;
   index.status = 'ready';
   index.builtAt = Date.now();
   console.log(
-    `[index] ready: ${tracksById.size} tracks in ${albums.size} albums (${
-      (Date.now() - t0) / 1000
-    }s)`
+    `[index] ready: ${tracksById.size} talks, ${groups.size} groups (${(Date.now() - t0) / 1000}s)`
   );
 }
 
-// Group albums by section for the browse view.
-function sectionsPayload() {
-  const sections = new Map();
-  for (const id of index.order) {
-    const a = index.albums.get(id);
-    if (!sections.has(a.section)) sections.set(a.section, []);
-    sections.get(a.section).push({ id: a.id, name: a.name, trackCount: a.tracks.length });
-  }
-  // Sort sections by album count (richest first), then name.
-  return [...sections.entries()]
-    .map(([name, albums]) => ({ name, albums }))
-    .sort((x, y) => y.albums.length - x.albums.length || x.name.localeCompare(y.name));
+function trackCount(g) {
+  let n = 0;
+  for (const t of g.speakers.values()) n += t.length;
+  return n;
+}
+function speakerTrackList(g) {
+  // [{name, trackCount}] sorted alphabetically (speaker == group means "loose" bucket)
+  return [...g.speakers.entries()]
+    .map(([name, talks]) => ({ name, trackCount: talks.length }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+}
+function slimTalk(t) {
+  return {
+    id: t.id, title: t.title, trackNo: t.trackNo, set: t.set,
+    group: t.group, speaker: t.speaker, duration: t.duration,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Passcode gate (stateless signed cookie)
+// Passcode gate
 // ---------------------------------------------------------------------------
-function sign(value) {
-  const mac = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex');
-  return `${value}.${mac}`;
-}
+function sign(v) { return `${v}.${crypto.createHmac('sha256', SESSION_SECRET).update(v).digest('hex')}`; }
 function verify(token) {
   if (!token || typeof token !== 'string') return false;
-  const idx = token.lastIndexOf('.');
-  if (idx < 0) return false;
-  const value = token.slice(0, idx);
-  const mac = token.slice(idx + 1);
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex');
-  const a = Buffer.from(mac);
-  const b = Buffer.from(expected);
+  const i = token.lastIndexOf('.');
+  if (i < 0) return false;
+  const v = token.slice(0, i), mac = token.slice(i + 1);
+  const exp = crypto.createHmac('sha256', SESSION_SECRET).update(v).digest('hex');
+  const a = Buffer.from(mac), b = Buffer.from(exp);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function requireAuth(req, res, next) {
@@ -274,127 +263,115 @@ app.get('/api/config', (req, res) => {
     gated: Boolean(APP_PASSCODE),
     authed: !APP_PASSCODE || verify(req.cookies && req.cookies.tp_auth),
     driveReady: Boolean(drive && FOLDER_ID),
-    index: {
-      status: index.status,
-      albums: index.albums.size,
-      tracks: index.tracksById.size,
-      builtAt: index.builtAt,
-    },
+    recentDays: RECENT_DAYS,
+    index: { status: index.status, talks: index.tracksById.size, groups: index.groups.size, builtAt: index.builtAt },
   });
 });
 
 app.post('/api/login', (req, res) => {
   if (!APP_PASSCODE) return res.json({ ok: true });
   const supplied = (req.body && req.body.passcode) || '';
-  const a = Buffer.from(String(supplied));
-  const b = Buffer.from(APP_PASSCODE);
-  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
-  if (!ok) return res.status(401).json({ error: 'wrong passcode' });
-  const token = sign(`ok:${Date.now()}`);
-  res.cookie('tp_auth', token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+  const a = Buffer.from(String(supplied)), b = Buffer.from(APP_PASSCODE);
+  if (!(a.length === b.length && crypto.timingSafeEqual(a, b)))
+    return res.status(401).json({ error: 'wrong passcode' });
+  res.cookie('tp_auth', sign(`ok:${Date.now()}`), {
+    httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production',
     maxAge: 1000 * 60 * 60 * 24 * 30,
   });
   res.json({ ok: true });
 });
+app.post('/api/logout', (req, res) => { res.clearCookie('tp_auth'); res.json({ ok: true }); });
 
-app.post('/api/logout', (req, res) => {
-  res.clearCookie('tp_auth');
-  res.json({ ok: true });
-});
-
-// Browse: sections -> albums
-app.get('/api/library', requireAuth, (req, res) => {
+// Top-level tabs: groups (ordered) + recent count
+app.get('/api/groups', requireAuth, (req, res) => {
+  const cutoff = Date.now() - RECENT_DAYS * 86400000;
+  const recentCount = index.recent.filter((t) => new Date(t.createdTime).getTime() >= cutoff).length;
   res.json({
     status: index.status,
-    totals: { albums: index.albums.size, tracks: index.tracksById.size },
-    sections: index.status === 'ready' ? sectionsPayload() : [],
+    recentDays: RECENT_DAYS,
+    recentCount,
+    groups: index.groupOrder.map((name) => {
+      const g = index.groups.get(name);
+      return { name, speakerCount: g.speakers.size, trackCount: trackCount(g) };
+    }),
   });
 });
 
-// One album's tracks
-app.get('/api/albums/:id', requireAuth, (req, res) => {
-  const a = index.albums.get(req.params.id);
-  if (!a) return res.status(404).json({ error: 'album not found' });
+// One group -> its speakers
+app.get('/api/groups/:name', requireAuth, (req, res) => {
+  const g = index.groups.get(req.params.name);
+  if (!g) return res.status(404).json({ error: 'group not found' });
+  res.json({ name: g.name, speakers: speakerTrackList(g) });
+});
+
+// One speaker -> their talks
+app.get('/api/talks', requireAuth, (req, res) => {
+  const g = index.groups.get(String(req.query.group || ''));
+  if (!g) return res.status(404).json({ error: 'group not found' });
+  const talks = g.speakers.get(String(req.query.speaker || ''));
+  if (!talks) return res.status(404).json({ error: 'speaker not found' });
   res.json({
-    id: a.id,
-    name: a.name,
-    section: a.section,
-    path: a.path,
-    tracks: a.tracks.map((t) => ({
-      id: t.id,
-      title: t.title,
-      trackNo: t.trackNo,
-      album: t.album,
-      section: t.section,
-      duration: t.duration,
-      size: t.size,
-      mimeType: t.mimeType,
-    })),
+    group: g.name,
+    speaker: String(req.query.speaker),
+    talks: talks.map(slimTalk),
   });
 });
 
-// Search across tracks and albums
+// Recently added (last N days by Drive createdTime)
+app.get('/api/recent', requireAuth, (req, res) => {
+  const days = Number(req.query.days || RECENT_DAYS);
+  const cutoff = Date.now() - days * 86400000;
+  const talks = index.recent
+    .filter((t) => new Date(t.createdTime).getTime() >= cutoff)
+    .slice(0, 300)
+    .map((t) => ({ ...slimTalk(t), createdTime: t.createdTime }));
+  res.json({ days, talks });
+});
+
+// Search talks + speakers
 app.get('/api/search', requireAuth, (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase();
-  if (!q) return res.json({ albums: [], tracks: [] });
-  const albums = [];
-  for (const id of index.order) {
-    const a = index.albums.get(id);
-    if (a.name.toLowerCase().includes(q) || a.section.toLowerCase().includes(q)) {
-      albums.push({ id: a.id, name: a.name, section: a.section, trackCount: a.tracks.length });
-      if (albums.length >= 60) break;
+  if (!q) return res.json({ speakers: [], talks: [] });
+  const speakers = [];
+  for (const g of index.groups.values()) {
+    for (const [name, talks] of g.speakers.entries()) {
+      if (name.toLowerCase().includes(q)) {
+        speakers.push({ group: g.name, name, trackCount: talks.length });
+        if (speakers.length >= 40) break;
+      }
     }
+    if (speakers.length >= 40) break;
   }
-  const tracks = [];
+  const talks = [];
   for (const t of index.tracksById.values()) {
     if (t.title.toLowerCase().includes(q)) {
-      tracks.push({
-        id: t.id,
-        title: t.title,
-        album: t.album,
-        albumId: t.albumId,
-        section: t.section,
-        duration: t.duration,
-      });
-      if (tracks.length >= 60) break;
+      talks.push(slimTalk(t));
+      if (talks.length >= 60) break;
     }
   }
-  res.json({ albums, tracks });
+  res.json({ speakers, talks });
 });
 
-// Rebuild the index on demand
-app.post('/api/refresh', requireAuth, async (req, res) => {
+app.post('/api/refresh', requireAuth, (req, res) => {
   if (index.status === 'building') return res.json({ status: 'building' });
-  buildIndex().catch((e) => {
-    index.status = 'error';
-    index.error = e.message;
-  });
+  buildIndex().catch((e) => { index.status = 'error'; index.error = e.message; });
   res.json({ status: 'building' });
 });
 
-// Stream a file with Range passthrough
+// Stream with Range passthrough
 app.get('/api/stream/:id', requireAuth, async (req, res) => {
   if (!drive || !auth) return res.status(503).send('Drive not configured');
-  const id = req.params.id;
   try {
     const client = await auth.getClient();
     const tokenResp = await client.getAccessToken();
     const accessToken = tokenResp && tokenResp.token;
     if (!accessToken) throw new Error('no access token');
-
-    const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
-      id
-    )}?alt=media&supportsAllDrives=true`;
+    const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(req.params.id)}?alt=media&supportsAllDrives=true`;
     const headers = { Authorization: `Bearer ${accessToken}` };
     if (req.headers.range) headers.Range = req.headers.range;
-
     const driveResp = await fetch(url, { headers });
     if (!driveResp.ok && driveResp.status !== 206) {
-      const text = await driveResp.text().catch(() => '');
-      console.error('[stream] drive', driveResp.status, text.slice(0, 200));
+      console.error('[stream] drive', driveResp.status);
       return res.status(driveResp.status).send('upstream error');
     }
     res.status(driveResp.status);
@@ -416,12 +393,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.listen(PORT, () => {
   console.log(`[server] Talks Player on http://localhost:${PORT} | gate: ${APP_PASSCODE ? 'ON' : 'OFF'}`);
-  // Kick off the initial index build.
   if (drive && FOLDER_ID) {
-    buildIndex().catch((e) => {
-      index.status = 'error';
-      index.error = e.message;
-      console.error('[index] build failed:', e.message);
-    });
+    buildIndex().catch((e) => { index.status = 'error'; index.error = e.message; console.error('[index] build failed:', e.message); });
   }
 });
