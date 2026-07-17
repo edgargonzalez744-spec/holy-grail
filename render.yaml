@@ -10,7 +10,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: APP_TITLE
-        value: Talks
+        value: Holy Grail
       - key: SESSION_SECRET
         generateValue: true   # Render generates a random secret
       # --- set these three in the Render dashboard (marked secret) ---

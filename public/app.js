@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 const audio = $('audio');
 
 const state = {
-  appTitle: 'Talks',
+  appTitle: 'Holy Grail',
   recentDays: 30,
   tabs: [],            // [{key, label}]
   activeTab: 'recent',
@@ -340,7 +340,7 @@ function setMediaSession(t) {
 // ---------------------------------------------------------------------------
 async function boot() {
   updatePlayIcons();
-  let cfg = { title: 'Talks', gated: false, authed: true };
+  let cfg = { title: 'Holy Grail', gated: false, authed: true };
   try { cfg = await (await fetch('/api/config')).json(); } catch (e) {}
   state.appTitle = cfg.title;
   document.title = cfg.title;

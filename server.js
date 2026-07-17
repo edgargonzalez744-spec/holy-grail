@@ -24,7 +24,7 @@ const { google } = require('googleapis');
 const PORT = process.env.PORT || 3000;
 const FOLDER_ID = process.env.DRIVE_FOLDER_ID || '';
 const APP_PASSCODE = process.env.APP_PASSCODE || '';
-const APP_TITLE = process.env.APP_TITLE || 'Talks';
+const APP_TITLE = process.env.APP_TITLE || 'Holy Grail';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const RECENT_DAYS = Number(process.env.RECENT_DAYS || 30);
 
