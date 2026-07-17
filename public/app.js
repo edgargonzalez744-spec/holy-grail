@@ -29,7 +29,22 @@ const PLAYMARK = '<svg viewBox="0 0 24 24" width="15" height="15" style="opacity
 // Helpers
 // ---------------------------------------------------------------------------
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
-function grad(seed) { const h = hashStr(seed); const a = h % 360, b = (a + 40 + (h % 60)) % 360; return `linear-gradient(140deg, hsl(${a} 60% 46%), hsl(${b} 56% 32%))`; }
+// Curated jewel-tone palette (cohesive, premium) assigned deterministically.
+const PALETTE = [
+  ['#1f8a5b', '#0c4d33'], // emerald
+  ['#2f5fd0', '#16346f'], // sapphire
+  ['#c0304f', '#7a0f2a'], // ruby
+  ['#7b4bd0', '#3f2470'], // amethyst
+  ['#1f9b8e', '#0f5f57'], // teal
+  ['#b5822a', '#7a5312'], // gold / topaz
+  ['#b03a6e', '#6e1f47'], // magenta / plum
+  ['#3a6ea5', '#1e3f66'], // steel blue
+  ['#5a8f3a', '#356020'], // peridot
+  ['#c15a3a', '#7a2f1c'], // garnet / copper
+  ['#2b7a78', '#134e4c'], // deep teal
+  ['#8a4bb0', '#4a2470'], // violet
+];
+function grad(seed) { const p = PALETTE[hashStr(seed) % PALETTE.length]; return `linear-gradient(140deg, ${p[0]}, ${p[1]})`; }
 function initials(s) { const w = String(s || '?').trim().split(/\s+/).filter(Boolean); return ((w[0]?.[0] || '?') + (w[1]?.[0] || '')).toUpperCase(); }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function fmtTime(sec) {
