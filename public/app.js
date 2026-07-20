@@ -89,6 +89,7 @@ function toggleFav(t) {
 const HEART = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
 const HEART_FILL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
 const MOON_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 12.9A9 9 0 1 1 11.1 3a7 7 0 0 0 9.9 9.9z"/></svg>';
+const SPARK_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11 2l1.7 5.3L18 9l-5.3 1.7L11 16l-1.7-5.3L4 9l5.3-1.7L11 2z"/><path d="M18.5 14l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3z"/></svg>';
 
 function showView(name) {
   state.view = name;
@@ -397,7 +398,12 @@ audio.addEventListener('timeupdate', () => {
   if (state.currentTrack && c > 0) savePos(state.currentTrack.id, c);
   if (sleep.endAt) updateSleepBtn();
 });
-audio.addEventListener('play', () => { updatePlayIcons(); $('nowArt').classList.remove('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+audio.addEventListener('play', () => {
+  updatePlayIcons(); $('nowArt').classList.remove('paused');
+  // Build/resume the Clarity graph here — play is a user gesture, so the context can start.
+  if (fx.on) { buildFx(); if (fx.ctx && fx.ctx.state === 'suspended') fx.ctx.resume(); }
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+});
 audio.addEventListener('pause', () => { updatePlayIcons(); $('nowArt').classList.add('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 audio.addEventListener('ended', () => {
   if (state.currentTrack) savePos(state.currentTrack.id, 0);
@@ -437,6 +443,59 @@ $('favBtn').addEventListener('click', () => {
   setFavIcon(toggleFav(state.currentTrack));
   if (state.view === 'home' && state.activeTab === 'favorites') loadFavorites();
 });
+
+// ---------------------------------------------------------------------------
+// Clarity: real-time cleanup for cassette-sourced audio (Web Audio).
+// Graph stays connected; "off" just flattens every stage, so it's transparent.
+// ---------------------------------------------------------------------------
+const fx = { ctx: null, nodes: null, on: (() => { try { return localStorage.getItem('tp_clarity') === '1'; } catch (e) { return false; } })() };
+
+function buildFx() {
+  if (fx.ctx) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  try {
+    const ctx = new Ctx();
+    const src = ctx.createMediaElementSource(audio); // same-origin stream, so this is allowed
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 20; hp.Q.value = 0.7;
+    const hum = ctx.createBiquadFilter(); hum.type = 'peaking'; hum.frequency.value = 60; hum.Q.value = 8; hum.gain.value = 0;
+    const mud = ctx.createBiquadFilter(); mud.type = 'peaking'; mud.frequency.value = 300; mud.Q.value = 1; mud.gain.value = 0;
+    const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 3000; pres.Q.value = 0.9; pres.gain.value = 0;
+    const hiss = ctx.createBiquadFilter(); hiss.type = 'highshelf'; hiss.frequency.value = 7500; hiss.gain.value = 0;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = 0; comp.knee.value = 6; comp.ratio.value = 1; comp.attack.value = 0.005; comp.release.value = 0.25;
+    const gain = ctx.createGain(); gain.gain.value = 1;
+    src.connect(hp); hp.connect(hum); hum.connect(mud); mud.connect(pres);
+    pres.connect(hiss); hiss.connect(comp); comp.connect(gain); gain.connect(ctx.destination);
+    fx.ctx = ctx;
+    fx.nodes = { hp, hum, mud, pres, hiss, comp, gain };
+    applyFx();
+  } catch (e) { /* Web Audio unavailable — playback continues untouched */ }
+}
+
+function applyFx() {
+  const n = fx.nodes; if (!n) return;
+  const t = fx.ctx.currentTime, on = fx.on;
+  const set = (p, v) => { try { p.setTargetAtTime(v, t, 0.05); } catch (e) { p.value = v; } };
+  set(n.hp.frequency, on ? 85 : 20);    // rumble / handling noise
+  set(n.hum.gain, on ? -12 : 0);        // 60Hz mains hum
+  set(n.mud.gain, on ? -3.5 : 0);       // boxy 300Hz tape mud
+  set(n.pres.gain, on ? 4 : 0);         // 3kHz speech presence
+  set(n.hiss.gain, on ? -9 : 0);        // 7.5kHz+ shelf = cassette hiss
+  set(n.comp.threshold, on ? -26 : 0);  // even out quiet/loud passages
+  set(n.comp.ratio, on ? 3 : 1);
+  set(n.gain.gain, on ? 1.35 : 1);      // makeup for the cuts
+}
+
+function setClarity(on) {
+  fx.on = on;
+  try { localStorage.setItem('tp_clarity', on ? '1' : '0'); } catch (e) {}
+  if (on) buildFx();
+  if (fx.ctx && fx.ctx.state === 'suspended') fx.ctx.resume();
+  applyFx();
+  $('clarityBtn').classList.toggle('on', on);
+}
+$('clarityBtn').addEventListener('click', () => setClarity(!fx.on));
 
 const sleep = { timer: null, endAt: null, endOfTalk: false };
 function clearSleep() { clearTimeout(sleep.timer); sleep.timer = null; sleep.endAt = null; sleep.endOfTalk = false; updateSleepBtn(); }
@@ -532,6 +591,8 @@ async function boot() {
   applyTheme();
   setFavIcon(false);
   updateSleepBtn();
+  $('clarityBtn').innerHTML = SPARK_IC;
+  $('clarityBtn').classList.toggle('on', fx.on);
   let cfg = { title: 'Holy Grail', gated: false, authed: true };
   try { cfg = await (await fetch('/api/config')).json(); } catch (e) {}
   state.appTitle = cfg.title;
@@ -553,3 +614,4 @@ $('lockForm').addEventListener('submit', async (e) => {
 });
 
 boot();
+
