@@ -2,7 +2,7 @@ services:
   - type: web
     name: talks-player
     runtime: node
-    plan: starter          # always-on; use "free" to test (sleeps when idle)
+    plan: free             # $0; sleeps when idle. Switch to "starter" ($7/mo) for always-on.
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/config
