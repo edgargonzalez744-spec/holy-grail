@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: talks-player
+    name: holy-grail
     runtime: node
     plan: free             # $0; sleeps when idle. Switch to "starter" ($7/mo) for always-on.
     buildCommand: npm install
