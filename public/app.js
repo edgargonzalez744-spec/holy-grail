@@ -458,17 +458,20 @@ function buildFx() {
     const ctx = new Ctx();
     const src = ctx.createMediaElementSource(audio); // same-origin stream, so this is allowed
     const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 20; hp.Q.value = 0.7;
-    const hum = ctx.createBiquadFilter(); hum.type = 'peaking'; hum.frequency.value = 60; hum.Q.value = 8; hum.gain.value = 0;
-    const mud = ctx.createBiquadFilter(); mud.type = 'peaking'; mud.frequency.value = 300; mud.Q.value = 1; mud.gain.value = 0;
-    const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 3000; pres.Q.value = 0.9; pres.gain.value = 0;
-    const hiss = ctx.createBiquadFilter(); hiss.type = 'highshelf'; hiss.frequency.value = 7500; hiss.gain.value = 0;
+    const hum = ctx.createBiquadFilter(); hum.type = 'peaking'; hum.frequency.value = 60; hum.Q.value = 10; hum.gain.value = 0;
+    const mud = ctx.createBiquadFilter(); mud.type = 'peaking'; mud.frequency.value = 280; mud.Q.value = 1; mud.gain.value = 0;
+    // Presence sits *below* the hiss band so it doesn't lift tape noise with it.
+    const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 2200; pres.Q.value = 1.2; pres.gain.value = 0;
+    const hiss = ctx.createBiquadFilter(); hiss.type = 'highshelf'; hiss.frequency.value = 5200; hiss.gain.value = 0;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 22000; lp.Q.value = 0.7;
+    // Peak-taming only: a high threshold never lifts the quiet noise floor.
     const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = 0; comp.knee.value = 6; comp.ratio.value = 1; comp.attack.value = 0.005; comp.release.value = 0.25;
+    comp.threshold.value = 0; comp.knee.value = 6; comp.ratio.value = 1; comp.attack.value = 0.003; comp.release.value = 0.25;
     const gain = ctx.createGain(); gain.gain.value = 1;
     src.connect(hp); hp.connect(hum); hum.connect(mud); mud.connect(pres);
-    pres.connect(hiss); hiss.connect(comp); comp.connect(gain); gain.connect(ctx.destination);
+    pres.connect(hiss); hiss.connect(lp); lp.connect(comp); comp.connect(gain); gain.connect(ctx.destination);
     fx.ctx = ctx;
-    fx.nodes = { hp, hum, mud, pres, hiss, comp, gain };
+    fx.nodes = { hp, hum, mud, pres, hiss, lp, comp, gain };
     applyFx();
   } catch (e) { /* Web Audio unavailable — playback continues untouched */ }
 }
@@ -477,14 +480,17 @@ function applyFx() {
   const n = fx.nodes; if (!n) return;
   const t = fx.ctx.currentTime, on = fx.on;
   const set = (p, v) => { try { p.setTargetAtTime(v, t, 0.05); } catch (e) { p.value = v; } };
-  set(n.hp.frequency, on ? 85 : 20);    // rumble / handling noise
-  set(n.hum.gain, on ? -12 : 0);        // 60Hz mains hum
-  set(n.mud.gain, on ? -3.5 : 0);       // boxy 300Hz tape mud
-  set(n.pres.gain, on ? 4 : 0);         // 3kHz speech presence
-  set(n.hiss.gain, on ? -9 : 0);        // 7.5kHz+ shelf = cassette hiss
-  set(n.comp.threshold, on ? -26 : 0);  // even out quiet/loud passages
-  set(n.comp.ratio, on ? 3 : 1);
-  set(n.gain.gain, on ? 1.35 : 1);      // makeup for the cuts
+  // Subtractive by design: Clarity must never come back louder, because any
+  // level lift on a tape transfer also lifts the hiss.
+  set(n.hp.frequency, on ? 90 : 20);    // rumble / handling noise
+  set(n.hum.gain, on ? -14 : 0);        // 60Hz mains hum
+  set(n.mud.gain, on ? -3 : 0);         // boxy 280Hz tape mud
+  set(n.pres.gain, on ? 2 : 0);         // gentle 2.2kHz presence, below the hiss band
+  set(n.hiss.gain, on ? -12 : 0);       // 5.2kHz+ shelf — the main de-hiss
+  set(n.lp.frequency, on ? 11000 : 22000); // roll off the last of the tape noise
+  set(n.comp.threshold, on ? -8 : 0);   // peaks only — never lifts the noise floor
+  set(n.comp.ratio, on ? 4 : 1);
+  set(n.gain.gain, 1);                  // no makeup gain, ever
 }
 
 function setClarity(on) {
@@ -614,4 +620,5 @@ $('lockForm').addEventListener('submit', async (e) => {
 });
 
 boot();
+
 
