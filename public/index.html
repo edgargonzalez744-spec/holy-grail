@@ -29,7 +29,9 @@
         <h1 id="lockTitle">Holy Grail</h1>
         <p>Enter the access code to continue</p>
         <form id="lockForm">
-          <input id="passcode" type="password" inputmode="numeric" autocomplete="off" placeholder="Access code" aria-label="Access code" />
+          <input id="passcode" type="password" inputmode="text" autocomplete="off"
+            autocapitalize="none" autocorrect="off" spellcheck="false"
+            placeholder="Access code" aria-label="Access code" />
           <button type="submit">Enter</button>
         </form>
         <div id="lockError" class="lock-error"></div>
