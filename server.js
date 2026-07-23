@@ -407,6 +407,13 @@ app.get('/api/groups/:name', requireAuth, (req, res) => {
   res.json({ name: g.name, speakers: speakerList(g) });
 });
 
+// One talk by id (for shared deep links)
+app.get('/api/talk/:id', requireAuth, (req, res) => {
+  const t = index.talksById.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'talk not found' });
+  res.json(talkPayload(t));
+});
+
 // One speaker -> their talks (each talk carries its tracks inline)
 app.get('/api/speaker', requireAuth, (req, res) => {
   const g = index.groups.get(String(req.query.group || ''));

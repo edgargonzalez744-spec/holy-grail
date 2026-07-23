@@ -83,10 +83,15 @@
               <div id="speakerGroup" class="speaker-group"></div>
               <h1 id="speakerName"></h1>
               <div id="speakerCount" class="speaker-count"></div>
-              <button id="playAll" class="play-all">
-                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
-                Play all
-              </button>
+              <div class="hero-actions">
+                <button id="playAll" class="play-all">
+                  <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+                  Play all
+                </button>
+                <button id="speakerShare" class="round-btn" aria-label="Share this speaker">
+                  <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+                </button>
+              </div>
             </div>
           </div>
           <div id="speakerTalks" class="talks"></div>
@@ -109,6 +114,9 @@
         <div id="nowBg" class="now-bg"></div>
         <div class="now-inner">
           <div class="grabber" id="grabber"></div>
+          <button id="nowShare" class="now-share" aria-label="Share this talk">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+          </button>
           <button id="nowClose" class="now-close" aria-label="Close player">
             <svg viewBox="0 0 24 24" width="26" height="26"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
           </button>
@@ -172,6 +180,7 @@
       </section>
     </div>
 
+    <div id="toast" class="toast hidden"></div>
     <audio id="audio" preload="metadata"></audio>
     <script src="/app.js"></script>
   </body>

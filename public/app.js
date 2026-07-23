@@ -185,6 +185,7 @@ async function loadTabs() {
     state.activeTab = 'group:' + data.groups[0].name;
   renderTabs();
   selectTab(state.activeTab);
+  handleDeepLink(); // if the app was opened via a shared link, act on it now
 }
 
 function renderTabs() {
@@ -313,6 +314,8 @@ async function openSpeaker(group, speaker, backTo) {
   let data;
   try { data = await (await fetch('/api/speaker?group=' + encodeURIComponent(group) + '&speaker=' + encodeURIComponent(speaker))).json(); }
   catch (e) { return; }
+  if (data.error) return;
+  state.currentSpeaker = { group: data.group, speaker: data.speaker };
   paintSpeaker(data);
   showView('speaker');
 }
@@ -780,6 +783,56 @@ $('themeToggle').addEventListener('click', () => {
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
   if (!localStorage.getItem('tp_theme')) applyTheme();
 });
+
+// ---------------------------------------------------------------------------
+// Share links + deep-link routing
+// ---------------------------------------------------------------------------
+let toastTimer = null;
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  requestAnimationFrame(() => t.classList.add('show'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.classList.add('hidden'), 220); }, 2200);
+}
+async function shareLink(url, title) {
+  try {
+    if (navigator.share) { await navigator.share({ title, url }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(url); showToast('Link copied'); }
+  catch (e) { window.prompt('Copy this link:', url); }
+}
+$('nowShare').addEventListener('click', () => {
+  if (!state.currentTalk) return;
+  const url = `${location.origin}/?t=${encodeURIComponent(state.currentTalk.id)}`;
+  shareLink(url, `${state.currentTalk.title} — ${state.appTitle}`);
+});
+$('speakerShare').addEventListener('click', () => {
+  if (!state.currentSpeaker) return;
+  const { group, speaker } = state.currentSpeaker;
+  const url = `${location.origin}/?g=${encodeURIComponent(group)}&sp=${encodeURIComponent(speaker)}`;
+  shareLink(url, `${speaker} — ${state.appTitle}`);
+});
+
+async function openTalkById(id) {
+  try {
+    const talk = await (await fetch('/api/talk/' + encodeURIComponent(id))).json();
+    if (talk && !talk.error) playTalk(talk);
+  } catch (e) {}
+}
+function handleDeepLink() {
+  if (state.deepLinkDone) return;
+  state.deepLinkDone = true;
+  const p = new URLSearchParams(location.search);
+  const talkId = p.get('t'), g = p.get('g'), sp = p.get('sp');
+  if (talkId || (g && sp)) {
+    // clean the URL so a refresh doesn't replay the link
+    try { history.replaceState(null, '', location.origin + '/'); } catch (e) {}
+    if (talkId) openTalkById(talkId);
+    else openSpeaker(g, sp, 'home');
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Boot
