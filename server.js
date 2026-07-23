@@ -38,6 +38,19 @@ const DEFERRED_GROUPS = ['Day One']; // pushed to the very end
 const COLLECTIONS = [
   { key: 'women', label: "Women's Leadership", re: /\b(wom[ae]n|ladies|lady)\b/i, after: 'Yager Group' },
 ];
+// Topic tags derived from a talk's title — the "topic" signal for personalization.
+const TOPIC_TAGS = [
+  { key: 'diamond', re: /\b(diamond|emerald|ruby|crown|go direct|going direct|direct)\b/i },
+  { key: 'attitude', re: /\b(attitude|mindset|belief|dream|vision|motivat|winning|winner|commitment|faith)\b/i },
+  { key: 'depth', re: /\b(depth|width|going deep|deep)\b/i },
+  { key: 'basics', re: /\b(basic|getting started|first (90|ninety)|fundamental|core step|nine core|eight core|beginning|start)\b/i },
+  { key: 'building', re: /\b(build|sponsor|contact|invit|show(ing)? the plan|recruit|prospect|grow)\b/i },
+  { key: 'leadership', re: /\b(leader|mentor|edificat|responsib)\b/i },
+  { key: 'money', re: /\b(money|financ|wealth|income|profit|freedom|free enterprise)\b/i },
+  { key: 'relationships', re: /\b(relationship|marriage|family|father|mother|men|wom[ae]n|ladies|couple)\b/i },
+  { key: 'functions', re: /\b(fed|spring leadership|winter conference|dream night|seminar|rally|family reunion|panel|breakout|conference)\b/i },
+];
+function tagTalk(title) { const out = []; for (const t of TOPIC_TAGS) if (t.re.test(title)) out.push(t.key); return out; }
 
 // ---------------------------------------------------------------------------
 // Google Drive client (service account)
@@ -201,6 +214,7 @@ async function buildIndex() {
         );
         talk.isAlbum = talk.tracks.length > 1;
         talk.trackCount = talk.tracks.length;
+        talk.tags = tagTalk(talk.title);
         talk.duration = talk.tracks.reduce((s, t) => s + (t.duration || 0), 0) || null;
         talk.createdTime = talk.tracks.map((t) => t.createdTime).filter(Boolean).sort().pop() || null;
       }
@@ -250,7 +264,7 @@ function collectionTalks(re) {
 function talkPayload(t) {
   return {
     id: t.id, title: t.title, group: t.group, speaker: t.speaker,
-    isAlbum: t.isAlbum, trackCount: t.trackCount, duration: t.duration,
+    isAlbum: t.isAlbum, trackCount: t.trackCount, duration: t.duration, tags: t.tags || [],
     tracks: t.tracks.map((tr) => ({ id: tr.id, title: tr.title, trackNo: tr.trackNo, duration: tr.duration })),
   };
 }
@@ -342,6 +356,41 @@ app.get('/api/suggest', requireAuth, (req, res) => {
   }
   if (picks.length < 2) take([...index.talksById.values()], 2);   // fall back to anywhere
   res.json({ talks: picks.slice(0, 2).map(talkPayload) });
+});
+
+// Personalized recommendations. Body: { count, exclude:[ids],
+// profile:{speakers,groups,topics}, context:{speaker,group} }.
+// Scores every talk by how well it matches the listener's taste (+ optional
+// context of what just played) and returns the top `count`.
+app.post('/api/recommend', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const prof = body.profile || {};
+  const sp = prof.speakers || {}, gr = prof.groups || {}, tp = prof.topics || {};
+  const ctx = body.context || {};
+  const exclude = new Set(body.exclude || []);
+  const count = Math.min(30, Math.max(1, body.count || 2));
+  const maxV = (o) => Math.max(1, ...Object.values(o).map(Number));
+  const maxSp = maxV(sp), maxGr = maxV(gr), maxTp = maxV(tp);
+
+  function score(t) {
+    let s = 0;
+    s += 3.0 * ((sp[t.speaker] || 0) / maxSp);                       // most-played speaker
+    const tags = t.tags || [];
+    if (tags.length) {
+      let sum = 0; for (const k of tags) sum += (tp[k] || 0);
+      s += 2.2 * ((sum / tags.length) / maxTp);                      // most-played topic
+    }
+    s += 1.0 * ((gr[t.group] || 0) / maxGr);                        // most-played group
+    if (ctx.speaker && t.speaker === ctx.speaker) s += 1.4;         // relate to what just played
+    if (ctx.group && t.group === ctx.group) s += 0.5;
+    s += Math.random() * 0.9;                                        // exploration
+    return s;
+  }
+  const scored = [...index.talksById.values()]
+    .filter((t) => !exclude.has(t.id))
+    .map((t) => ({ t, s: score(t) }))
+    .sort((a, b) => b.s - a.s);
+  res.json({ talks: scored.slice(0, count).map((x) => talkPayload(x.t)) });
 });
 
 // A smart collection (talks whose title matches the collection's pattern)

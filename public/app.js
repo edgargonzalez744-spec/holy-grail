@@ -104,6 +104,24 @@ function toggleFav(talk) {
   return !on;
 }
 
+// ---------------------------------------------------------------------------
+// Taste profile (per-device): learns most-played speaker / topic / group.
+// ---------------------------------------------------------------------------
+const TASTE_KEY = 'tp_taste';
+function getProfile() {
+  const p = readJson(TASTE_KEY);
+  return { speakers: p.speakers || {}, groups: p.groups || {}, topics: p.topics || {}, plays: p.plays || 0 };
+}
+function bumpTaste(talk) {
+  if (!talk) return;
+  const p = getProfile();
+  if (talk.speaker) p.speakers[talk.speaker] = (p.speakers[talk.speaker] || 0) + 1;
+  if (talk.group) p.groups[talk.group] = (p.groups[talk.group] || 0) + 1;
+  (talk.tags || []).forEach((k) => { p.topics[k] = (p.topics[k] || 0) + 1; });
+  p.plays = (p.plays || 0) + 1;
+  writeJson(TASTE_KEY, p);
+}
+
 const HEART = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
 const HEART_FILL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
 const MOON_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 12.9A9 9 0 1 1 11.1 3a7 7 0 0 0 9.9 9.9z"/></svg>';
@@ -194,19 +212,42 @@ function continueCard(e, i) {
     <div class="ccard-sub">${left ? fmtTime(left) + ' left' : escapeHtml(e.speaker || '')}</div>
   </div>`;
 }
+function pickCard(t, i) {
+  return `
+  <div class="ccard" data-i="${i}">
+    <div class="ccard-art" style="background:${grad(t.speaker || t.group)}">${escapeHtml(initials(t.speaker || t.title))}</div>
+    <div class="ccard-title">${escapeHtml(t.title)}</div>
+    <div class="ccard-sub">${escapeHtml(t.speaker || t.group || '')}</div>
+  </div>`;
+}
 
 async function loadListenNow() {
   const cont = getContinue();
-  let recent = [];
+  const profile = getProfile();
+  let recent = [], foryou = [];
   try { recent = (await (await fetch('/api/recent?days=' + state.recentDays)).json()).talks; } catch (e) {}
+  // "For You" appears once there's enough listening to personalize.
+  if (profile.plays >= 3) {
+    const exclude = [...cont.map((c) => c.id), ...readJson(RECENT_KEY).slice(0, 6).map((x) => x.id)];
+    try {
+      foryou = (await (await fetch('/api/recommend', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count: 12, exclude, profile }),
+      })).json()).talks || [];
+    } catch (e) {}
+  }
   let html = '';
+  if (foryou.length)
+    html += `<div class="section-title">For you</div><div class="shelf" id="fyShelf">${foryou.map(pickCard).join('')}</div>`;
   if (cont.length)
     html += `<div class="section-title">Continue listening</div><div class="shelf" id="contShelf">${cont.map(continueCard).join('')}</div>`;
   if (recent.length)
     html += `<div class="section-title">Recently added</div><div class="talks" id="recentTalks">${recent.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
-  if (!cont.length && !recent.length)
-    html = `<div class="empty"><p>Play a talk and it’ll appear here to pick up where you left off.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">New talks added to your Drive folder show up under Recently added.</p></div>`;
+  if (!foryou.length && !cont.length && !recent.length)
+    html = `<div class="empty"><p>Play a talk and it’ll appear here to pick up where you left off.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">As you listen, a personalized “For you” row appears here.</p></div>`;
   $('homeContent').innerHTML = html;
+  if (foryou.length)
+    document.querySelectorAll('#fyShelf .ccard').forEach((el) => el.addEventListener('click', () => playTalk(foryou[Number(el.dataset.i)])));
   if (cont.length)
     document.querySelectorAll('#contShelf .ccard').forEach((el) => {
       const e = cont[Number(el.dataset.i)];
@@ -343,7 +384,7 @@ function talkToItems(talk) {
   return tracks.map((tr, i) => ({
     id: tr.id, partTitle: tr.title, trackNo: tr.trackNo, duration: tr.duration,
     group: talk.group, speaker: talk.speaker, talkId: talk.id, talkTitle: talk.title,
-    isAlbum: talk.isAlbum || tracks.length > 1, partIndex: i, partCount: tracks.length,
+    tags: talk.tags || [], isAlbum: talk.isAlbum || tracks.length > 1, partIndex: i, partCount: tracks.length,
   }));
 }
 // Play one talk (albums auto-advance through their parts).
@@ -363,15 +404,17 @@ function playTrack(it) {
   if (!it) return;
   hideUpNext();
   const switching = !state.currentItem || state.currentItem.id !== it.id;
+  const talkChanged = !state.currentItem || state.currentItem.talkId !== it.talkId;
   state.currentItem = it;
   // Reconstruct the current talk from the contiguous parts in the queue (for favorites / recent).
   const parts = state.queue.filter((x) => x.talkId === it.talkId);
   state.currentTalk = {
     id: it.talkId, title: it.talkTitle, speaker: it.speaker, group: it.group,
-    isAlbum: it.isAlbum, trackCount: it.partCount,
+    isAlbum: it.isAlbum, trackCount: it.partCount, tags: it.tags || [],
     duration: parts.reduce((s, x) => s + (x.duration || 0), 0) || null,
     tracks: parts.map((x) => ({ id: x.id, title: x.partTitle, trackNo: x.trackNo, duration: x.duration })),
   };
+  if (talkChanged) bumpTaste(state.currentTalk); // learn taste when a new talk starts
   if (switching) {
     audio.src = `/api/stream/${encodeURIComponent(it.id)}`;
     audio.load();
@@ -598,9 +641,18 @@ const upnext = { timer: null, left: 0, choices: [] };
 async function showUpNext() {
   const talk = state.currentTalk;
   if (!talk) return;
+  const recentIds = readJson(RECENT_KEY).slice(0, 8).map((x) => x.id);
   let data;
   try {
-    data = await (await fetch(`/api/suggest?group=${encodeURIComponent(talk.group)}&speaker=${encodeURIComponent(talk.speaker)}&exclude=${encodeURIComponent(talk.id)}`)).json();
+    data = await (await fetch('/api/recommend', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        count: 2,
+        exclude: [talk.id, ...recentIds],
+        profile: getProfile(),
+        context: { speaker: talk.speaker, group: talk.group },
+      }),
+    })).json();
   } catch (e) { return; }
   const list = (data.talks || []).slice(0, 2);
   if (!list.length) return;
