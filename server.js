@@ -31,6 +31,11 @@ const RECENT_DAYS = Number(process.env.RECENT_DAYS || 30);
 const AUDIO_RE = /(^audio\/)|(video\/mp4)|(mpeg)/i;
 // Groups shown first, in this order; any others appended after.
 const PREFERRED_GROUPS = ['BWW', 'Amway', 'WWDB', 'Yager Group', 'Day One'];
+// Smart collections: talks whose TITLE matches are gathered into a tab
+// (non-destructive — the talk still lives under its speaker/group too).
+const COLLECTIONS = [
+  { key: 'women', label: "Women's Leadership", re: /\b(wom[ae]n|ladies|lady)\b/i },
+];
 
 // ---------------------------------------------------------------------------
 // Google Drive client (service account)
@@ -230,6 +235,12 @@ function speakerList(g) {
     .map((sp) => ({ name: sp.name, talkCount: sp.talks.size }))
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
+function collectionTalks(re) {
+  const out = [];
+  for (const t of index.talksById.values()) if (re.test(t.title)) out.push(t);
+  out.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
+  return out;
+}
 // A talk with its tracks inline, ready for the player.
 function talkPayload(t) {
   return {
@@ -302,7 +313,17 @@ app.get('/api/groups', requireAuth, (req, res) => {
       const g = index.groups.get(name);
       return { name, speakerCount: g.speakers.size, talkCount: groupTalkCount(g) };
     }),
+    collections: COLLECTIONS
+      .map((c) => ({ key: c.key, label: c.label, count: collectionTalks(c.re).length }))
+      .filter((c) => c.count > 0),
   });
+});
+
+// A smart collection (talks whose title matches the collection's pattern)
+app.get('/api/collection/:key', requireAuth, (req, res) => {
+  const c = COLLECTIONS.find((x) => x.key === req.params.key);
+  if (!c) return res.status(404).json({ error: 'collection not found' });
+  res.json({ key: c.key, label: c.label, talks: collectionTalks(c.re).map(talkPayload) });
 });
 
 // One group -> its speakers

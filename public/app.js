@@ -134,7 +134,9 @@ async function loadTabs() {
   state.tabs = [
     { key: 'listen', label: 'Listen Now' },
     { key: 'favorites', label: 'Favorites' },
-  ].concat(data.groups.map((g) => ({ key: 'group:' + g.name, label: g.name })));
+  ]
+    .concat((data.collections || []).map((c) => ({ key: 'col:' + c.key, label: c.label })))
+    .concat(data.groups.map((g) => ({ key: 'group:' + g.name, label: g.name })));
   // Land on Listen Now only if it has something to show; otherwise open the first group.
   if (state.activeTab === 'listen' && !getContinue().length && data.recentCount === 0 && data.groups.length)
     state.activeTab = 'group:' + data.groups[0].name;
@@ -156,7 +158,20 @@ function selectTab(key) {
   showView('home');
   if (key === 'listen') loadListenNow();
   else if (key === 'favorites') loadFavorites();
+  else if (key.startsWith('col:')) loadCollection(key.slice('col:'.length));
   else loadGroup(key.slice('group:'.length));
+}
+
+async function loadCollection(key) {
+  $('homeContent').innerHTML = '<div class="section-title">Loading…</div>';
+  let data;
+  try { data = await (await fetch('/api/collection/' + encodeURIComponent(key))).json(); } catch (e) { return; }
+  if (!data.talks || !data.talks.length) {
+    $('homeContent').innerHTML = `<div class="empty"><p>Nothing here yet.</p></div>`;
+    return;
+  }
+  $('homeContent').innerHTML = `<div class="section-title">${escapeHtml(data.label)} · ${data.talks.length}</div><div class="talks" id="colTalks">${data.talks.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
+  bindTalkRows(document.getElementById('colTalks'), data.talks);
 }
 
 function continueCard(e, i) {
