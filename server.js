@@ -23,6 +23,10 @@ const { google } = require('googleapis');
 
 const PORT = process.env.PORT || 3000;
 const FOLDER_ID = process.env.DRIVE_FOLDER_ID || '';
+// Optional: a Drive folder shared with the service account as EDITOR, used to
+// store per-person profiles (taste, favorites, resume positions) so they sync
+// across devices. The talks folder stays Viewer-only and can't be modified.
+const DATA_FOLDER_ID = process.env.DATA_FOLDER_ID || '';
 const APP_PASSCODE = process.env.APP_PASSCODE || '';
 const APP_TITLE = process.env.APP_TITLE || 'Holy Grail';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -74,7 +78,9 @@ function initDrive() {
   if (credentials.private_key) credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
   auth = new google.auth.GoogleAuth({
     credentials,
-    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+    // Read-only unless a data folder is configured; even then, the talks folder
+    // is shared as Viewer so it still cannot be written to.
+    scopes: [DATA_FOLDER_ID ? 'https://www.googleapis.com/auth/drive' : 'https://www.googleapis.com/auth/drive.readonly'],
   });
   drive = google.drive({ version: 'v3', auth });
   console.log('[drive] service account ready:', credentials.client_email || '(unknown)');
@@ -292,7 +298,7 @@ function requireAuth(req, res, next) {
 // App
 // ---------------------------------------------------------------------------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // profiles carry many resume positions
 app.use(cookieParser());
 
 app.get('/api/config', (req, res) => {
@@ -405,6 +411,72 @@ app.get('/api/groups/:name', requireAuth, (req, res) => {
   const g = index.groups.get(req.params.name);
   if (!g) return res.status(404).json({ error: 'group not found' });
   res.json({ name: g.name, speakers: speakerList(g) });
+});
+
+// ---------------------------------------------------------------------------
+// Per-person profiles stored in a Drive data folder (syncs across devices).
+// The server treats profile contents as opaque JSON.
+// ---------------------------------------------------------------------------
+const profileCache = new Map(); // name -> { data, fileId }
+const profileSafe = (n) => String(n).trim().slice(0, 40).replace(/[^\w .'&-]/g, '');
+const profileFile = (n) => `profile-${profileSafe(n)}.json`;
+
+async function findProfile(name) {
+  const q = `'${DATA_FOLDER_ID}' in parents and trashed = false and name = '${profileFile(name).replace(/'/g, "\\'")}'`;
+  const { data } = await drive.files.list({ q, fields: 'files(id,name)', pageSize: 1, supportsAllDrives: true, includeItemsFromAllDrives: true });
+  return (data.files || [])[0] || null;
+}
+async function listProfiles() {
+  const { data } = await drive.files.list({
+    q: `'${DATA_FOLDER_ID}' in parents and trashed = false and name contains 'profile-'`,
+    fields: 'files(id,name)', pageSize: 200, supportsAllDrives: true, includeItemsFromAllDrives: true,
+  });
+  return (data.files || [])
+    .map((f) => (f.name.match(/^profile-(.+)\.json$/) || [])[1])
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+async function readProfile(name) {
+  const cached = profileCache.get(profileSafe(name));
+  if (cached) return cached.data;
+  const f = await findProfile(name);
+  if (!f) return null;
+  const client = await auth.getClient();
+  const { token } = await client.getAccessToken();
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: `Bearer ${token}` } });
+  const data = resp.ok ? await resp.json().catch(() => ({})) : {};
+  profileCache.set(profileSafe(name), { data, fileId: f.id });
+  return data;
+}
+async function writeProfile(name, data) {
+  const body = JSON.stringify(data || {});
+  const existing = profileCache.get(profileSafe(name))?.fileId || (await findProfile(name))?.id;
+  if (existing) {
+    await drive.files.update({ fileId: existing, media: { mimeType: 'application/json', body }, supportsAllDrives: true });
+    profileCache.set(profileSafe(name), { data, fileId: existing });
+  } else {
+    const { data: created } = await drive.files.create({
+      requestBody: { name: profileFile(name), parents: [DATA_FOLDER_ID], mimeType: 'application/json' },
+      media: { mimeType: 'application/json', body }, fields: 'id', supportsAllDrives: true,
+    });
+    profileCache.set(profileSafe(name), { data, fileId: created.id });
+  }
+}
+
+app.get('/api/profiles', requireAuth, async (req, res) => {
+  if (!DATA_FOLDER_ID) return res.json({ enabled: false, profiles: [] });
+  try { res.json({ enabled: true, profiles: await listProfiles() }); }
+  catch (e) { console.error('[profiles]', e.message); res.status(500).json({ enabled: true, profiles: [], error: e.message }); }
+});
+app.get('/api/profile/:name', requireAuth, async (req, res) => {
+  if (!DATA_FOLDER_ID) return res.status(404).json({ error: 'profiles disabled' });
+  try { res.json({ name: profileSafe(req.params.name), data: (await readProfile(req.params.name)) || {} }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put('/api/profile/:name', requireAuth, async (req, res) => {
+  if (!DATA_FOLDER_ID) return res.status(404).json({ error: 'profiles disabled' });
+  try { await writeProfile(req.params.name, req.body || {}); res.json({ ok: true }); }
+  catch (e) { console.error('[profile save]', e.message); res.status(500).json({ error: e.message }); }
 });
 
 // One talk by id (for shared deep links)

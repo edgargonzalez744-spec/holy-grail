@@ -38,6 +38,21 @@
       </div>
     </div>
 
+    <!-- Who's listening? (profile picker) -->
+    <div id="whoScreen" class="lock hidden">
+      <div class="lock-card">
+        <img class="lock-mark" src="/icon-192.png?v=2" alt="" />
+        <h1>Who's listening?</h1>
+        <p>Pick your profile so your favorites and place-in-a-talk follow you across devices.</p>
+        <div id="whoList" class="who-list"></div>
+        <form id="whoForm">
+          <input id="whoName" type="text" autocomplete="off" autocapitalize="words" placeholder="Your name" aria-label="Your name" />
+          <button type="submit">Create profile</button>
+        </form>
+        <div id="whoError" class="lock-error"></div>
+      </div>
+    </div>
+
     <!-- Main app -->
     <div id="app" class="app hidden">
       <header class="topbar">
@@ -52,6 +67,7 @@
           <input id="searchInput" type="search" placeholder="Search talks or speakers" />
         </div>
         <button id="themeToggle" class="theme-btn" aria-label="Switch light or dark mode"></button>
+        <button id="profileBtn" class="theme-btn hidden" aria-label="Switch profile"></button>
       </header>
 
       <!-- Tab bar -->

@@ -54,7 +54,7 @@ function fmtTime(sec) {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
 }
 const posKey = (id) => `tp_pos_${id}`, durKey = (id) => `tp_dur_${id}`;
-function savePos(id, t) { try { localStorage.setItem(posKey(id), String(Math.floor(t))); } catch (e) {} }
+function savePos(id, t) { try { localStorage.setItem(posKey(id), String(Math.floor(t))); } catch (e) {} markDirty(); }
 function loadPos(id) { const v = Number(localStorage.getItem(posKey(id))); return isFinite(v) ? v : 0; }
 function cacheDur(id, d) { try { localStorage.setItem(durKey(id), String(Math.round(d))); } catch (e) {} }
 function cachedDur(id) { const v = Number(localStorage.getItem(durKey(id))); return isFinite(v) && v > 0 ? v : null; }
@@ -78,6 +78,7 @@ function recordPlay(talk, partId) {
   const list = readJson(RECENT_KEY).filter((x) => x.id !== talk.id);
   list.unshift({ ...slimTalk(talk), partId: partId || (talk.tracks && talk.tracks[0] && talk.tracks[0].id) });
   writeJson(RECENT_KEY, list.slice(0, 40));
+  markDirty();
 }
 // Continue Listening: progress is measured across the whole talk (all parts).
 function getContinue() {
@@ -101,6 +102,7 @@ function toggleFav(talk) {
   const on = list.some((x) => x.id === talk.id);
   list = on ? list.filter((x) => x.id !== talk.id) : [slimTalk(talk), ...list];
   writeJson(FAV_KEY, list);
+  markDirty();
   return !on;
 }
 
@@ -120,6 +122,7 @@ function bumpTaste(talk, weight = 1) {
   (talk.tags || []).forEach((k) => { p.topics[k] = (p.topics[k] || 0) + weight; });
   p.plays = (p.plays || 0) + 1;
   writeJson(TASTE_KEY, p);
+  markDirty();
 }
 
 // Completion-weighted crediting: a finished talk counts fully; a talk you skip
@@ -896,6 +899,104 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Profiles: sync taste / favorites / resume positions across devices.
+// Local storage stays the source of truth while using the app; we hydrate from
+// the server on sign-in and push back (debounced) whenever something changes.
+// ---------------------------------------------------------------------------
+const PROFILE_KEY = 'tp_profile';
+function currentProfile() { try { return localStorage.getItem(PROFILE_KEY) || ''; } catch (e) { return ''; } }
+
+function collectSyncState() {
+  const positions = {}, durations = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k) continue;
+    if (k.startsWith('tp_pos_')) positions[k.slice(7)] = Number(localStorage.getItem(k)) || 0;
+    else if (k.startsWith('tp_dur_')) durations[k.slice(7)] = Number(localStorage.getItem(k)) || 0;
+  }
+  return { taste: getProfile(), favs: getFavs(), recent: readJson(RECENT_KEY), positions, durations, at: Date.now() };
+}
+function applySyncState(s) {
+  if (!s || typeof s !== 'object') return;
+  if (s.taste) writeJson(TASTE_KEY, s.taste);
+  if (Array.isArray(s.favs)) writeJson(FAV_KEY, s.favs);
+  if (Array.isArray(s.recent)) writeJson(RECENT_KEY, s.recent);
+  try {
+    for (const [id, v] of Object.entries(s.positions || {})) if (v > 0) localStorage.setItem('tp_pos_' + id, String(Math.floor(v)));
+    for (const [id, v] of Object.entries(s.durations || {})) if (v > 0) localStorage.setItem('tp_dur_' + id, String(Math.round(v)));
+  } catch (e) {}
+}
+let syncTimer = null, dirtySince = 0;
+function markDirty() {
+  if (!currentProfile()) return;
+  if (!dirtySince) dirtySince = Date.now();
+  clearTimeout(syncTimer);
+  // Position saves fire constantly while playing — force a push if we've been
+  // debouncing for a while so changes actually reach the other device.
+  const delay = Date.now() - dirtySince > 25000 ? 0 : 4000;
+  syncTimer = setTimeout(pushProfile, delay);
+}
+async function pushProfile() {
+  const name = currentProfile();
+  if (!name) return;
+  clearTimeout(syncTimer);
+  syncTimer = null; dirtySince = 0;
+  try {
+    await fetch('/api/profile/' + encodeURIComponent(name), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectSyncState()),
+    });
+  } catch (e) {}
+}
+async function pullProfile(name) {
+  try {
+    const r = await (await fetch('/api/profile/' + encodeURIComponent(name))).json();
+    applySyncState(r && r.data);
+  } catch (e) {}
+}
+// Flush pending changes when leaving so the other device gets them.
+addEventListener('pagehide', () => { if (currentProfile() && syncTimer) pushProfile(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && syncTimer) pushProfile(); });
+
+function profileAvatar(name) {
+  return `<span class="profile-av" style="background:${grad(name)}">${escapeHtml(initials(name))}</span>`;
+}
+async function showWho() {
+  $('lock').classList.add('hidden');
+  $('app').classList.add('hidden');
+  $('whoScreen').classList.remove('hidden');
+  $('whoError').textContent = '';
+  let list = [];
+  try { list = (await (await fetch('/api/profiles')).json()).profiles || []; } catch (e) {}
+  $('whoList').innerHTML = list.map((n) => `<button class="who-item" data-name="${escapeHtml(n)}">${profileAvatar(n)}<span class="who-name">${escapeHtml(n)}</span></button>`).join('');
+  $('whoList').querySelectorAll('.who-item').forEach((el) => el.addEventListener('click', () => chooseProfile(el.dataset.name)));
+}
+async function chooseProfile(name) {
+  if (!name) return;
+  try { localStorage.setItem(PROFILE_KEY, name); } catch (e) {}
+  await pullProfile(name);            // bring this device in line with the profile
+  $('whoScreen').classList.add('hidden');
+  paintProfileBtn();
+  enterApp();
+}
+$('whoForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('whoName').value.trim();
+  if (!name) return;
+  await chooseProfile(name);
+  await pushProfile();                // create the profile file on the server
+});
+function paintProfileBtn() {
+  const n = currentProfile();
+  const b = $('profileBtn');
+  if (!n || !state.profilesEnabled) { b.classList.add('hidden'); return; }
+  b.classList.remove('hidden');
+  b.innerHTML = profileAvatar(n);
+  b.title = `Listening as ${n} — tap to switch`;
+}
+$('profileBtn').addEventListener('click', async () => { await pushProfile(); showWho(); });
+
+// ---------------------------------------------------------------------------
 // Share links + deep-link routing
 // ---------------------------------------------------------------------------
 let toastTimer = null;
@@ -968,7 +1069,24 @@ async function boot() {
   if (cfg.gated && !cfg.authed) { $('lock').classList.remove('hidden'); return; }
   showApp();
 }
-function showApp() { $('lock').classList.add('hidden'); $('app').classList.remove('hidden'); showView('home'); loadTabs(); }
+// After the passcode: if profiles are enabled, pick who's listening first.
+async function showApp() {
+  $('lock').classList.add('hidden');
+  let enabled = false;
+  try { enabled = !!(await (await fetch('/api/profiles')).json()).enabled; } catch (e) {}
+  state.profilesEnabled = enabled;
+  if (enabled && !currentProfile()) { showWho(); return; }
+  if (enabled) await pullProfile(currentProfile()); // refresh from the other device
+  enterApp();
+}
+function enterApp() {
+  $('lock').classList.add('hidden');
+  $('whoScreen').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  paintProfileBtn();
+  showView('home');
+  loadTabs();
+}
 $('lockForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('lockError').textContent = '';
