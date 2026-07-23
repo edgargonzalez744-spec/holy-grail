@@ -112,14 +112,31 @@ function getProfile() {
   const p = readJson(TASTE_KEY);
   return { speakers: p.speakers || {}, groups: p.groups || {}, topics: p.topics || {}, plays: p.plays || 0 };
 }
-function bumpTaste(talk) {
-  if (!talk) return;
+function bumpTaste(talk, weight = 1) {
+  if (!talk || weight <= 0) return;
   const p = getProfile();
-  if (talk.speaker) p.speakers[talk.speaker] = (p.speakers[talk.speaker] || 0) + 1;
-  if (talk.group) p.groups[talk.group] = (p.groups[talk.group] || 0) + 1;
-  (talk.tags || []).forEach((k) => { p.topics[k] = (p.topics[k] || 0) + 1; });
+  if (talk.speaker) p.speakers[talk.speaker] = (p.speakers[talk.speaker] || 0) + weight;
+  if (talk.group) p.groups[talk.group] = (p.groups[talk.group] || 0) + weight;
+  (talk.tags || []).forEach((k) => { p.topics[k] = (p.topics[k] || 0) + weight; });
   p.plays = (p.plays || 0) + 1;
   writeJson(TASTE_KEY, p);
+}
+
+// Completion-weighted crediting: a finished talk counts fully; a talk you skip
+// early counts little. Prevents "started but bailed" talks from skewing taste.
+let lastCreditedTalkId = null;
+let curListen = { talkId: null, secs: 0, lastT: 0 };
+function completionFraction(talk) {
+  const tracks = talk.tracks || [];
+  const total = tracks.reduce((s, t) => s + (t.duration || cachedDur(t.id) || 0), 0);
+  const secs = curListen.talkId === talk.id ? curListen.secs : 0;
+  return Math.max(0, Math.min(1, total > 0 ? secs / total : secs / 600));
+}
+function creditTalk(talk, opts) {
+  if (!talk || talk.id === lastCreditedTalkId) return;
+  lastCreditedTalkId = talk.id;
+  const w = opts && opts.finished ? 1 : completionFraction(talk);
+  if (w >= 0.08) bumpTaste(talk, w);   // ignore quick skips
 }
 
 const HEART = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
@@ -403,8 +420,10 @@ function playFromQueue(items, index) { state.queue = items; state.queueIndex = i
 function playTrack(it) {
   if (!it) return;
   hideUpNext();
+  const prevTalk = state.currentTalk;
   const switching = !state.currentItem || state.currentItem.id !== it.id;
   const talkChanged = !state.currentItem || state.currentItem.talkId !== it.talkId;
+  if (talkChanged && prevTalk) creditTalk(prevTalk, { finished: false }); // credit what they actually heard
   state.currentItem = it;
   // Reconstruct the current talk from the contiguous parts in the queue (for favorites / recent).
   const parts = state.queue.filter((x) => x.talkId === it.talkId);
@@ -414,7 +433,6 @@ function playTrack(it) {
     duration: parts.reduce((s, x) => s + (x.duration || 0), 0) || null,
     tracks: parts.map((x) => ({ id: x.id, title: x.partTitle, trackNo: x.trackNo, duration: x.duration })),
   };
-  if (talkChanged) bumpTaste(state.currentTalk); // learn taste when a new talk starts
   if (switching) {
     audio.src = `/api/stream/${encodeURIComponent(it.id)}`;
     audio.load();
@@ -497,6 +515,13 @@ audio.addEventListener('timeupdate', () => {
   $('cur').textContent = fmtTime(c);
   if (d) { $('seek').value = String(Math.round((c / d) * 1000)); $('miniProgress').firstElementChild.style.width = (c / d) * 100 + '%'; }
   if (state.currentItem && c > 0) savePos(state.currentItem.id, c);
+  // Accumulate content actually heard for this talk (skips don't count).
+  if (state.currentItem) {
+    if (curListen.talkId !== state.currentItem.talkId) curListen = { talkId: state.currentItem.talkId, secs: 0, lastT: c };
+    const dt = c - curListen.lastT;
+    if (dt > 0 && dt < 1.5) curListen.secs += dt;
+    curListen.lastT = c;
+  }
   if (sleep.endAt) updateSleepBtn();
 });
 audio.addEventListener('play', () => {
@@ -512,7 +537,8 @@ audio.addEventListener('ended', () => {
   const moreInQueue = i < q.length - 1;
   const nextSameTalk = moreInQueue && q[i + 1].talkId === q[i].talkId;
   if (nextSameTalk) { playNext(); return; }        // more parts of the same album
-  // The whole talk just finished:
+  // The whole talk just finished — full completion credit.
+  creditTalk(state.currentTalk, { finished: true });
   if (sleep.endOfTalk) { clearSleep(); return; }   // sleep timer set to "end of talk" → stop
   if (moreInQueue) { playNext(); return; }          // play-all → roll into the next talk
   showUpNext();                                     // nothing queued → suggest what's next
