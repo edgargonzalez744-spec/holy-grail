@@ -12,7 +12,8 @@ const state = {
   tabs: [],            // [{key, label}]
   activeTab: 'listen',
   view: 'home',        // home | search | speaker
-  currentTrack: null,
+  currentTalk: null,  // the talk (speech) now playing
+  currentItem: null,  // the specific part/track now playing
   queue: [],
   queueIndex: -1,
   speedIdx: 0,
@@ -64,24 +65,41 @@ function cachedDur(id) { const v = Number(localStorage.getItem(durKey(id))); ret
 const RECENT_KEY = 'tp_recent', FAV_KEY = 'tp_favs';
 function readJson(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch (e) { return []; } }
 function writeJson(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
-function slimTrack(t) { return { id: t.id, title: t.title, speaker: t.speaker, group: t.group, set: t.set, duration: t.duration }; }
-function recordPlay(t) {
-  const list = readJson(RECENT_KEY).filter((x) => x.id !== t.id);
-  list.unshift(slimTrack(t));
+// Stored talk record (a talk keeps its parts so it can resume/replay).
+function slimTalk(t) {
+  return {
+    id: t.id, title: t.title, speaker: t.speaker, group: t.group,
+    isAlbum: t.isAlbum, trackCount: t.trackCount, duration: t.duration,
+    tracks: (t.tracks || []).map((tr) => ({ id: tr.id, title: tr.title, trackNo: tr.trackNo, duration: tr.duration })),
+  };
+}
+function recordPlay(talk, partId) {
+  if (!talk) return;
+  const list = readJson(RECENT_KEY).filter((x) => x.id !== talk.id);
+  list.unshift({ ...slimTalk(talk), partId: partId || (talk.tracks && talk.tracks[0] && talk.tracks[0].id) });
   writeJson(RECENT_KEY, list.slice(0, 40));
 }
+// Continue Listening: progress is measured across the whole talk (all parts).
 function getContinue() {
   return readJson(RECENT_KEY)
-    .map((x) => ({ ...x, pos: loadPos(x.id), dur: cachedDur(x.id) || x.duration || 0 }))
-    .filter((x) => x.pos > 15 && (!x.dur || x.pos < x.dur - 20))
+    .map((e) => {
+      const tracks = e.tracks || [];
+      const partDur = (t) => t.duration || cachedDur(t.id) || 0; // audio durations aren't known until played
+      const total = e.duration || tracks.reduce((s, t) => s + partDur(t), 0) || 0;
+      const pIdx = Math.max(0, tracks.findIndex((t) => t.id === e.partId));
+      let before = 0; for (let i = 0; i < pIdx; i++) before += partDur(tracks[i]);
+      const pos = loadPos(e.partId || (tracks[0] && tracks[0].id));
+      return { ...e, elapsed: before + pos, total, pIdx };
+    })
+    .filter((e) => e.elapsed > 15 && (!e.total || e.elapsed < e.total - 20))
     .slice(0, 12);
 }
 function getFavs() { return readJson(FAV_KEY); }
 function isFav(id) { return readJson(FAV_KEY).some((x) => x.id === id); }
-function toggleFav(t) {
+function toggleFav(talk) {
   let list = readJson(FAV_KEY);
-  const on = list.some((x) => x.id === t.id);
-  list = on ? list.filter((x) => x.id !== t.id) : [slimTrack(t), ...list];
+  const on = list.some((x) => x.id === talk.id);
+  list = on ? list.filter((x) => x.id !== talk.id) : [slimTalk(talk), ...list];
   writeJson(FAV_KEY, list);
   return !on;
 }
@@ -141,17 +159,16 @@ function selectTab(key) {
   else loadGroup(key.slice('group:'.length));
 }
 
-function continueCard(t, i) {
-  const dur = t.dur || t.duration || cachedDur(t.id) || 0;
-  const pct = dur ? Math.min(100, Math.round((t.pos / dur) * 100)) : 0;
-  const left = dur ? Math.max(0, dur - t.pos) : 0;
+function continueCard(e, i) {
+  const pct = e.total ? Math.min(100, Math.round((e.elapsed / e.total) * 100)) : 0;
+  const left = e.total ? Math.max(0, e.total - e.elapsed) : 0;
   return `
   <div class="ccard" data-i="${i}">
-    <div class="ccard-art" style="background:${grad(t.speaker || t.group)}">${escapeHtml(initials(t.speaker || t.title))}
+    <div class="ccard-art" style="background:${grad(e.speaker || e.group)}">${escapeHtml(initials(e.speaker || e.title))}
       <div class="ccard-prog"><span style="width:${pct}%"></span></div>
     </div>
-    <div class="ccard-title">${escapeHtml(t.title)}</div>
-    <div class="ccard-sub">${left ? fmtTime(left) + ' left' : escapeHtml(t.speaker || '')}</div>
+    <div class="ccard-title">${escapeHtml(e.title)}</div>
+    <div class="ccard-sub">${left ? fmtTime(left) + ' left' : escapeHtml(e.speaker || '')}</div>
   </div>`;
 }
 
@@ -168,9 +185,10 @@ async function loadListenNow() {
     html = `<div class="empty"><p>Play a talk and it’ll appear here to pick up where you left off.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">New talks added to your Drive folder show up under Recently added.</p></div>`;
   $('homeContent').innerHTML = html;
   if (cont.length)
-    document.querySelectorAll('#contShelf .ccard').forEach((el) =>
-      el.addEventListener('click', () => playFromQueue(cont, Number(el.dataset.i)))
-    );
+    document.querySelectorAll('#contShelf .ccard').forEach((el) => {
+      const e = cont[Number(el.dataset.i)];
+      el.addEventListener('click', () => playTalk(e, e.pIdx));
+    });
   if (recent.length) bindTalkRows(document.getElementById('recentTalks'), recent);
 }
 
@@ -195,7 +213,7 @@ async function loadGroup(name) {
       <div class="avatar" style="background:${grad(s.name)}">${escapeHtml(initials(s.name))}</div>
       <div class="rowinfo">
         <div class="rowtitle">${escapeHtml(s.name)}</div>
-        <div class="rowsub">${s.trackCount} talk${s.trackCount === 1 ? '' : 's'}</div>
+        <div class="rowsub">${s.talkCount} talk${s.talkCount === 1 ? '' : 's'}</div>
       </div>${CHEV}
     </div>`
     )
@@ -212,57 +230,37 @@ async function loadGroup(name) {
 async function openSpeaker(group, speaker, backTo) {
   state.backTo = backTo || 'home';
   let data;
-  try { data = await (await fetch('/api/talks?group=' + encodeURIComponent(group) + '&speaker=' + encodeURIComponent(speaker))).json(); }
+  try { data = await (await fetch('/api/speaker?group=' + encodeURIComponent(group) + '&speaker=' + encodeURIComponent(speaker))).json(); }
   catch (e) { return; }
   paintSpeaker(data);
   showView('speaker');
 }
 
 function paintSpeaker(data) {
-  const isGroupBucket = data.speaker === data.group;
   $('backLabel').textContent = data.group;
   $('speakerAvatar').style.background = grad(data.speaker);
   $('speakerAvatar').textContent = initials(data.speaker);
   $('speakerGroup').textContent = data.group;
   $('speakerName').textContent = data.speaker;
   $('speakerCount').textContent = `${data.talks.length} talk${data.talks.length === 1 ? '' : 's'}`;
-  $('playAll').onclick = () => { if (data.talks.length) playFromQueue(data.talks, 0); };
-
-  // Group talks by set; only show a set header when that set groups 2+ talks
-  // (avoids a header on top of every single-talk set).
-  const sets = [...new Set(data.talks.map((t) => t.set))];
-  const setCount = {};
-  data.talks.forEach((t) => { setCount[t.set] = (setCount[t.set] || 0) + 1; });
-  let html = '';
-  let idx = 0;
-  for (const setName of sets) {
-    const multi = setCount[setName] > 1;
-    // Skip the header when the "set" is really just the speaker/group bucket (loose talks).
-    if (multi && setName !== data.speaker && !(isGroupBucket && setName === data.group))
-      html += `<div class="set-head">${escapeHtml(setName)}</div>`;
-    for (const t of data.talks.filter((x) => x.set === setName)) {
-      html += talkRowHtml(t, idx, false);
-      idx++;
-    }
-  }
-  $('speakerTalks').innerHTML = html;
+  $('playAll').onclick = () => { if (data.talks.length) playAllTalks(data.talks); };
+  $('speakerTalks').innerHTML = data.talks.map((t, i) => talkRowHtml(t, i, false)).join('');
   bindTalkRows($('speakerTalks'), data.talks);
 }
 
 // ---------------------------------------------------------------------------
 // Talk rows (shared)
 // ---------------------------------------------------------------------------
+// A TALK row. Albums show a "Album · N parts" badge; single talks are plain.
 function talkRowHtml(t, i, showSpeaker) {
-  const dur = t.duration || cachedDur(t.id);
-  const active = state.currentTrack && state.currentTrack.id === t.id;
+  const dur = t.duration || (t.tracks && t.tracks.length === 1 ? cachedDur(t.tracks[0].id) : null);
+  const active = state.currentTalk && state.currentTalk.id === t.id;
   const playing = active && !audio.paused;
-  // In recent/search: show "Speaker · Group". In a speaker page: show the set only if it's a
-  // real distinct set (not the speaker/title itself) — otherwise nothing.
-  // Recent/search rows show "Speaker · Group". On a speaker page the set headers give
-  // context, so rows there carry no subtitle.
-  const sub = showSpeaker ? `${t.speaker === t.group ? t.group : t.speaker} · ${t.group}` : '';
+  const album = t.isAlbum ? `Album · ${t.trackCount} parts` : '';
+  const who = showSpeaker ? (t.speaker === t.group ? t.group : t.speaker) : '';
+  const sub = [who, album].filter(Boolean).join(' · ');
   return `
-    <div class="track ${active ? 'active' : ''}" data-idx="${i}">
+    <div class="track ${active ? 'active' : ''}" data-idx="${i}" data-talkid="${escapeHtml(t.id)}">
       <div class="track-ic">${playing ? '<span class="bars"><i></i><i></i><i></i></span>' : PLAYMARK}</div>
       <div class="track-info">
         <div class="track-title">${escapeHtml(t.title)}</div>
@@ -273,7 +271,7 @@ function talkRowHtml(t, i, showSpeaker) {
 }
 function bindTalkRows(root, talks) {
   root.querySelectorAll('.track[data-idx]').forEach((el) =>
-    el.addEventListener('click', () => playFromQueue(talks, Number(el.dataset.idx)))
+    el.addEventListener('click', () => playTalk(talks[Number(el.dataset.idx)]))
   );
 }
 
@@ -296,7 +294,7 @@ async function runSearch(q) {
     html += data.speakers.map((s) => `
       <div class="rowitem" data-group="${escapeHtml(s.group)}" data-speaker="${escapeHtml(s.name)}">
         <div class="avatar" style="background:${grad(s.name)}">${escapeHtml(initials(s.name))}</div>
-        <div class="rowinfo"><div class="rowtitle">${escapeHtml(s.name)}</div><div class="rowsub">${escapeHtml(s.group)} · ${s.trackCount} talk${s.trackCount === 1 ? '' : 's'}</div></div>${CHEV}
+        <div class="rowinfo"><div class="rowtitle">${escapeHtml(s.name)}</div><div class="rowsub">${escapeHtml(s.group)} · ${s.talkCount} talk${s.talkCount === 1 ? '' : 's'}</div></div>${CHEV}
       </div>`).join('');
     html += `</div>`;
   }
@@ -316,15 +314,44 @@ async function runSearch(q) {
 // ---------------------------------------------------------------------------
 // Playback
 // ---------------------------------------------------------------------------
-function playFromQueue(tracks, index) { state.queue = tracks; state.queueIndex = index; playTrack(tracks[index]); }
-function playTrack(t) {
-  if (!t) return;
-  const switching = !state.currentTrack || state.currentTrack.id !== t.id;
-  state.currentTrack = t;
+// Turn a talk into playable parts, each carrying the talk's context.
+function talkToItems(talk) {
+  const tracks = talk.tracks || [];
+  return tracks.map((tr, i) => ({
+    id: tr.id, partTitle: tr.title, trackNo: tr.trackNo, duration: tr.duration,
+    group: talk.group, speaker: talk.speaker, talkId: talk.id, talkTitle: talk.title,
+    isAlbum: talk.isAlbum || tracks.length > 1, partIndex: i, partCount: tracks.length,
+  }));
+}
+// Play one talk (albums auto-advance through their parts).
+function playTalk(talk, startPart) {
+  const items = talkToItems(talk);
+  if (!items.length) return;
+  playFromQueue(items, startPart || 0);
+}
+// Play every talk of a speaker back to back.
+function playAllTalks(talks) {
+  const items = talks.flatMap(talkToItems);
+  if (!items.length) return;
+  playFromQueue(items, 0);
+}
+function playFromQueue(items, index) { state.queue = items; state.queueIndex = index; playTrack(items[index]); }
+function playTrack(it) {
+  if (!it) return;
+  const switching = !state.currentItem || state.currentItem.id !== it.id;
+  state.currentItem = it;
+  // Reconstruct the current talk from the contiguous parts in the queue (for favorites / recent).
+  const parts = state.queue.filter((x) => x.talkId === it.talkId);
+  state.currentTalk = {
+    id: it.talkId, title: it.talkTitle, speaker: it.speaker, group: it.group,
+    isAlbum: it.isAlbum, trackCount: it.partCount,
+    duration: parts.reduce((s, x) => s + (x.duration || 0), 0) || null,
+    tracks: parts.map((x) => ({ id: x.id, title: x.partTitle, trackNo: x.trackNo, duration: x.duration })),
+  };
   if (switching) {
-    audio.src = `/api/stream/${encodeURIComponent(t.id)}`;
+    audio.src = `/api/stream/${encodeURIComponent(it.id)}`;
     audio.load();
-    const resume = loadPos(t.id);
+    const resume = loadPos(it.id);
     if (resume > 5) audio.addEventListener('loadedmetadata', function once() {
       if (resume < audio.duration - 10) audio.currentTime = resume;
       audio.removeEventListener('loadedmetadata', once);
@@ -332,24 +359,26 @@ function playTrack(t) {
   }
   audio.playbackRate = state.speeds[state.speedIdx];
   audio.play().catch(() => {});
-  recordPlay(t);
-  paintNowPlaying(t);
+  recordPlay(state.currentTalk, it.id);
+  paintNowPlaying(it);
   openNow();
-  setMediaSession(t);
+  setMediaSession(it);
   refreshActive();
 }
-function paintNowPlaying(t) {
-  const g = grad(t.speaker || t.group || '');
-  const sub = t.speaker && t.speaker !== t.group ? `${t.speaker} · ${t.group}` : t.group;
-  $('nowArt').style.background = g; $('nowArt').textContent = initials(t.speaker || t.title);
+function paintNowPlaying(it) {
+  const g = grad(it.speaker || it.group || '');
+  const sub = it.isAlbum
+    ? `Part ${it.partIndex + 1} of ${it.partCount} · ${it.speaker}`
+    : (it.speaker && it.speaker !== it.group ? `${it.speaker} · ${it.group}` : it.group);
+  $('nowArt').style.background = g; $('nowArt').textContent = initials(it.speaker || it.talkTitle);
   $('nowArt').classList.toggle('paused', audio.paused);
   $('nowBg').style.background = g;
-  $('nowTitle').innerHTML = `<span class="mqt">${escapeHtml(t.title)}</span>`;
+  $('nowTitle').innerHTML = `<span class="mqt">${escapeHtml(it.talkTitle)}</span>`;
   $('nowSpeaker').textContent = sub;
-  setFavIcon(isFav(t.id));
+  setFavIcon(isFav(it.talkId));
   requestAnimationFrame(setupMarquee);
-  $('miniArt').style.background = g; $('miniArt').textContent = initials(t.speaker || t.title);
-  $('miniTitle').textContent = t.title; $('miniSpeaker').textContent = sub;
+  $('miniArt').style.background = g; $('miniArt').textContent = initials(it.speaker || it.talkTitle);
+  $('miniTitle').textContent = it.talkTitle; $('miniSpeaker').textContent = sub;
   $('mini').classList.remove('hidden');
 }
 
@@ -370,8 +399,13 @@ function setupMarquee() {
   }
 }
 function refreshActive() {
-  document.querySelectorAll('.track').forEach((el) => el.classList.remove('active'));
-  // Re-mark by matching current track id in visible rows is handled on next render; keep simple.
+  const id = state.currentTalk && state.currentTalk.id;
+  document.querySelectorAll('.track[data-talkid]').forEach((el) => {
+    const on = id && el.dataset.talkid === id;
+    el.classList.toggle('active', on);
+    const ic = el.querySelector('.track-ic');
+    if (ic) ic.innerHTML = on && !audio.paused ? '<span class="bars"><i></i><i></i><i></i></span>' : PLAYMARK;
+  });
 }
 function togglePlay() { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
 function playNext() { if (state.queueIndex < state.queue.length - 1) playFromQueue(state.queue, state.queueIndex + 1); }
@@ -389,13 +423,13 @@ function closeNow() { $('now').classList.add('closing'); setTimeout(() => $('now
 // Audio events
 // ---------------------------------------------------------------------------
 let seeking = false;
-audio.addEventListener('loadedmetadata', () => { $('dur').textContent = fmtTime(audio.duration); if (state.currentTrack) cacheDur(state.currentTrack.id, audio.duration); });
+audio.addEventListener('loadedmetadata', () => { $('dur').textContent = fmtTime(audio.duration); if (state.currentItem) cacheDur(state.currentItem.id, audio.duration); });
 audio.addEventListener('timeupdate', () => {
   if (seeking) return;
   const d = audio.duration || 0, c = audio.currentTime || 0;
   $('cur').textContent = fmtTime(c);
   if (d) { $('seek').value = String(Math.round((c / d) * 1000)); $('miniProgress').firstElementChild.style.width = (c / d) * 100 + '%'; }
-  if (state.currentTrack && c > 0) savePos(state.currentTrack.id, c);
+  if (state.currentItem && c > 0) savePos(state.currentItem.id, c);
   if (sleep.endAt) updateSleepBtn();
 });
 audio.addEventListener('play', () => {
@@ -406,8 +440,12 @@ audio.addEventListener('play', () => {
 });
 audio.addEventListener('pause', () => { updatePlayIcons(); $('nowArt').classList.add('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 audio.addEventListener('ended', () => {
-  if (state.currentTrack) savePos(state.currentTrack.id, 0);
-  if (sleep.endOfTalk) { clearSleep(); return; } // stop the chain when "end of talk" timer is set
+  if (state.currentItem) savePos(state.currentItem.id, 0);
+  // "End of talk" timer stops when the whole talk finishes (last part, or the
+  // next queued part belongs to a different talk).
+  const q = state.queue, i = state.queueIndex;
+  const lastOfTalk = i >= q.length - 1 || (q[i + 1] && q[i + 1].talkId !== q[i].talkId);
+  if (sleep.endOfTalk && lastOfTalk) { clearSleep(); return; }
   playNext();
 });
 
@@ -439,8 +477,8 @@ document.addEventListener('keydown', (e) => {
 // Favorites button, sleep timer, swipe-to-dismiss
 // ---------------------------------------------------------------------------
 $('favBtn').addEventListener('click', () => {
-  if (!state.currentTrack) return;
-  setFavIcon(toggleFav(state.currentTrack));
+  if (!state.currentTalk) return;
+  setFavIcon(toggleFav(state.currentTalk));
   if (state.view === 'home' && state.activeTab === 'favorites') loadFavorites();
 });
 
@@ -551,9 +589,9 @@ function dragEnd(e) {
 document.addEventListener('mousemove', dragMove);
 document.addEventListener('mouseup', dragEnd);
 
-function setMediaSession(t) {
+function setMediaSession(it) {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.speaker || t.group || '', album: state.appTitle });
+  navigator.mediaSession.metadata = new MediaMetadata({ title: it.talkTitle, artist: it.speaker || it.group || '', album: state.appTitle });
   const set = (a, fn) => { try { navigator.mediaSession.setActionHandler(a, fn); } catch (e) {} };
   set('play', () => audio.play()); set('pause', () => audio.pause());
   set('seekbackward', () => { audio.currentTime = Math.max(0, audio.currentTime - 15); });
