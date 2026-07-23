@@ -361,6 +361,7 @@ function playAllTalks(talks) {
 function playFromQueue(items, index) { state.queue = items; state.queueIndex = index; playTrack(items[index]); }
 function playTrack(it) {
   if (!it) return;
+  hideUpNext();
   const switching = !state.currentItem || state.currentItem.id !== it.id;
   state.currentItem = it;
   // Reconstruct the current talk from the contiguous parts in the queue (for favorites / recent).
@@ -440,7 +441,7 @@ function updatePlayIcons() {
     : '<svg class="play-svg" viewBox="0 0 24 24" style="width:22px;height:22px"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
 }
 function openNow() { $('now').style.transform = ''; $('now').classList.remove('hidden', 'closing'); }
-function closeNow() { $('now').classList.add('closing'); setTimeout(() => $('now').classList.add('hidden'), 380); }
+function closeNow() { hideUpNext(); $('now').classList.add('closing'); setTimeout(() => $('now').classList.add('hidden'), 380); }
 
 // ---------------------------------------------------------------------------
 // Audio events
@@ -464,12 +465,14 @@ audio.addEventListener('play', () => {
 audio.addEventListener('pause', () => { updatePlayIcons(); $('nowArt').classList.add('paused'); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
 audio.addEventListener('ended', () => {
   if (state.currentItem) savePos(state.currentItem.id, 0);
-  // "End of talk" timer stops when the whole talk finishes (last part, or the
-  // next queued part belongs to a different talk).
   const q = state.queue, i = state.queueIndex;
-  const lastOfTalk = i >= q.length - 1 || (q[i + 1] && q[i + 1].talkId !== q[i].talkId);
-  if (sleep.endOfTalk && lastOfTalk) { clearSleep(); return; }
-  playNext();
+  const moreInQueue = i < q.length - 1;
+  const nextSameTalk = moreInQueue && q[i + 1].talkId === q[i].talkId;
+  if (nextSameTalk) { playNext(); return; }        // more parts of the same album
+  // The whole talk just finished:
+  if (sleep.endOfTalk) { clearSleep(); return; }   // sleep timer set to "end of talk" → stop
+  if (moreInQueue) { playNext(); return; }          // play-all → roll into the next talk
+  showUpNext();                                     // nothing queued → suggest what's next
 });
 
 // ---------------------------------------------------------------------------
@@ -586,6 +589,56 @@ $('now').addEventListener('click', (e) => {
   if (!$('sleepMenu').classList.contains('hidden') && !e.target.closest('#sleepMenu') && !e.target.closest('#sleepBtn'))
     $('sleepMenu').classList.add('hidden');
 });
+
+// ---------------------------------------------------------------------------
+// Up next: when a full talk ends, offer 2 suggestions with a 7s auto-play.
+// ---------------------------------------------------------------------------
+const UPNEXT_SECONDS = 7;
+const upnext = { timer: null, left: 0, choices: [] };
+async function showUpNext() {
+  const talk = state.currentTalk;
+  if (!talk) return;
+  let data;
+  try {
+    data = await (await fetch(`/api/suggest?group=${encodeURIComponent(talk.group)}&speaker=${encodeURIComponent(talk.speaker)}&exclude=${encodeURIComponent(talk.id)}`)).json();
+  } catch (e) { return; }
+  const list = (data.talks || []).slice(0, 2);
+  if (!list.length) return;
+  openNow();
+  renderUpNext(list);
+}
+function fillUnCard(elId, t) {
+  const el = $(elId);
+  el.classList.remove('hidden');
+  const art = el.querySelector('.un-art');
+  art.style.background = grad(t.speaker || t.group);
+  art.textContent = initials(t.speaker || t.title);
+  el.querySelector('.un-title').textContent = t.title;
+  el.querySelector('.un-sub').textContent = (t.isAlbum ? `Album · ${t.trackCount} parts · ` : '') + (t.speaker || '');
+  el.onclick = () => { hideUpNext(); playTalk(t); };
+}
+function renderUpNext(list) {
+  upnext.choices = list;
+  fillUnCard('un0', list[0]);
+  if (list[1]) fillUnCard('un1', list[1]); else $('un1').classList.add('hidden');
+  $('upnext').classList.remove('hidden');
+  upnext.left = UPNEXT_SECONDS;
+  $('upnextCount').textContent = `Autoplaying in ${upnext.left}s`;
+  const bar = $('upnextBar');
+  bar.style.transition = 'none'; bar.style.width = '100%';
+  requestAnimationFrame(() => { bar.style.transition = `width ${UPNEXT_SECONDS}s linear`; bar.style.width = '0%'; });
+  clearInterval(upnext.timer);
+  upnext.timer = setInterval(() => {
+    upnext.left--;
+    if (upnext.left <= 0) { const pick = upnext.choices[0]; hideUpNext(); playTalk(pick); }
+    else $('upnextCount').textContent = `Autoplaying in ${upnext.left}s`;
+  }, 1000);
+}
+function hideUpNext() {
+  clearInterval(upnext.timer); upnext.timer = null;
+  $('upnext').classList.add('hidden');
+}
+$('upnextCancel').addEventListener('click', hideUpNext);
 
 let drag = { y0: null, on: false };
 function dragStart(e) { drag.y0 = e.touches ? e.touches[0].clientY : e.clientY; drag.on = true; $('now').style.transition = 'none'; }

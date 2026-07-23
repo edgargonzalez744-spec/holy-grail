@@ -324,6 +324,26 @@ app.get('/api/groups', requireAuth, (req, res) => {
   });
 });
 
+// Two "up next" suggestions when a talk finishes: one more from the same
+// speaker, one from elsewhere in the group, filling from anywhere if needed.
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+app.get('/api/suggest', requireAuth, (req, res) => {
+  const group = String(req.query.group || ''), speaker = String(req.query.speaker || ''), exclude = String(req.query.exclude || '');
+  const seen = new Set([exclude]);
+  const picks = [];
+  const take = (pool, n) => { for (const t of shuffle(pool.slice())) { if (picks.length >= n) break; if (!seen.has(t.id)) { seen.add(t.id); picks.push(t); } } };
+  const g = index.groups.get(group);
+  const sp = g && g.speakers.get(speaker);
+  if (sp) take(sp.talksArr, 1);                                   // one more from this speaker
+  if (g && picks.length < 2) {                                    // one from elsewhere in the group
+    const pool = [];
+    for (const s of g.speakers.values()) if (s.name !== speaker) pool.push(...s.talksArr);
+    take(pool, 2);
+  }
+  if (picks.length < 2) take([...index.talksById.values()], 2);   // fall back to anywhere
+  res.json({ talks: picks.slice(0, 2).map(talkPayload) });
+});
+
 // A smart collection (talks whose title matches the collection's pattern)
 app.get('/api/collection/:key', requireAuth, (req, res) => {
   const c = COLLECTIONS.find((x) => x.key === req.params.key);
