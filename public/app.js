@@ -139,7 +139,67 @@ function creditTalk(talk, opts) {
   if (w >= 0.08) bumpTaste(talk, w);   // ignore quick skips
 }
 
+// ---------------------------------------------------------------------------
+// Offline downloads: audio blobs in IndexedDB; a talk manifest in localStorage.
+// ---------------------------------------------------------------------------
+const DL_DB = 'tp_offline', DL_STORE = 'audio', DL_KEY = 'tp_downloads';
+const dlUrls = {}; // trackId -> object URL (kept in memory for instant playback)
+let _db = null;
+function idb() {
+  return new Promise((res, rej) => {
+    if (_db) return res(_db);
+    const r = indexedDB.open(DL_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(DL_STORE);
+    r.onsuccess = () => { _db = r.result; res(_db); };
+    r.onerror = () => rej(r.error);
+  });
+}
+function idbPut(k, v) { return idb().then((db) => new Promise((res, rej) => { const tx = db.transaction(DL_STORE, 'readwrite'); tx.objectStore(DL_STORE).put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); })); }
+function idbGet(k) { return idb().then((db) => new Promise((res, rej) => { const rq = db.transaction(DL_STORE, 'readonly').objectStore(DL_STORE).get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); })); }
+function idbDel(k) { return idb().then((db) => new Promise((res, rej) => { const tx = db.transaction(DL_STORE, 'readwrite'); tx.objectStore(DL_STORE).delete(k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); })); }
+
+function getDownloads() { return readJson(DL_KEY); }
+function isDownloaded(talkId) { return getDownloads().some((t) => t.id === talkId); }
+async function loadDownloadUrls() {
+  for (const t of getDownloads()) {
+    for (const tr of t.tracks || []) {
+      if (dlUrls[tr.id]) continue;
+      try { const blob = await idbGet(tr.id); if (blob) dlUrls[tr.id] = URL.createObjectURL(blob); } catch (e) {}
+    }
+  }
+}
+async function downloadTalk(talk, onProgress) {
+  const tracks = talk.tracks || [];
+  for (let i = 0; i < tracks.length; i++) {
+    const tr = tracks[i];
+    const resp = await fetch('/api/stream/' + encodeURIComponent(tr.id));
+    if (!resp.ok || !resp.body) throw new Error('fetch failed');
+    const total = Number(resp.headers.get('content-length')) || 0;
+    const reader = resp.body.getReader();
+    const chunks = []; let recv = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); recv += value.length;
+      if (onProgress) onProgress((i + (total ? recv / total : 0)) / tracks.length);
+    }
+    const blob = new Blob(chunks, { type: resp.headers.get('content-type') || 'audio/mpeg' });
+    await idbPut(tr.id, blob);
+    dlUrls[tr.id] = URL.createObjectURL(blob);
+  }
+  const list = getDownloads().filter((t) => t.id !== talk.id);
+  list.unshift(slimTalk(talk));
+  writeJson(DL_KEY, list);
+}
+async function deleteDownload(talkId) {
+  const t = getDownloads().find((x) => x.id === talkId);
+  if (t) for (const tr of t.tracks || []) { try { await idbDel(tr.id); } catch (e) {} if (dlUrls[tr.id]) { URL.revokeObjectURL(dlUrls[tr.id]); delete dlUrls[tr.id]; } }
+  writeJson(DL_KEY, getDownloads().filter((x) => x.id !== talkId));
+}
+
 const HEART = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
+const DL_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"/></svg>';
+const DL_DONE_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>';
 const HEART_FILL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 20s-7-4.4-9.4-8.5C1.1 8.2 3 4.8 6.4 4.8c2.2 0 4 1.5 5.6 3.3 1.6-1.8 3.4-3.3 5.6-3.3 3.4 0 5.3 3.4 3.8 6.7C19 15.6 12 20 12 20z"/></svg>';
 const MOON_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 12.9A9 9 0 1 1 11.1 3a7 7 0 0 0 9.9 9.9z"/></svg>';
 const SPARK_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M11 2l1.7 5.3L18 9l-5.3 1.7L11 16l-1.7-5.3L4 9l5.3-1.7L11 2z"/><path d="M18.5 14l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3z"/></svg>';
@@ -155,9 +215,21 @@ function showView(name) {
 // ---------------------------------------------------------------------------
 // Tabs + home
 // ---------------------------------------------------------------------------
+function renderOfflineHome() {
+  state.tabs = [{ key: 'listen', label: 'Downloads' }];
+  state.activeTab = 'listen';
+  renderTabs();
+  showView('home');
+  const downloads = getDownloads();
+  $('homeContent').innerHTML = downloads.length
+    ? `<div class="section-title">Downloaded <span style="color:var(--text-3);font-weight:400">· offline</span></div><div class="talks" id="dlTalks">${downloads.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`
+    : `<div class="empty"><p>You’re offline.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">Downloaded talks show up here. Reconnect to browse the full library.</p></div>`;
+  if (downloads.length) bindTalkRows(document.getElementById('dlTalks'), downloads);
+}
+
 async function loadTabs() {
   let data;
-  try { data = await (await fetch('/api/groups')).json(); } catch (e) { return; }
+  try { data = await (await fetch('/api/groups')).json(); } catch (e) { renderOfflineHome(); return; }
   if (data.status !== 'ready') {
     $('indexing').classList.remove('hidden');
     setTimeout(loadTabs, 1500);
@@ -254,14 +326,17 @@ async function loadListenNow() {
       })).json()).talks || [];
     } catch (e) {}
   }
+  const downloads = getDownloads();
   let html = '';
   if (foryou.length)
     html += `<div class="section-title">For you</div><div class="shelf" id="fyShelf">${foryou.map(pickCard).join('')}</div>`;
   if (cont.length)
     html += `<div class="section-title">Continue listening</div><div class="shelf" id="contShelf">${cont.map(continueCard).join('')}</div>`;
+  if (downloads.length)
+    html += `<div class="section-title">Downloaded <span style="color:var(--text-3);font-weight:400">· offline</span></div><div class="talks" id="dlTalks">${downloads.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
   if (recent.length)
     html += `<div class="section-title">Recently added</div><div class="talks" id="recentTalks">${recent.map((t, i) => talkRowHtml(t, i, true)).join('')}</div>`;
-  if (!foryou.length && !cont.length && !recent.length)
+  if (!foryou.length && !cont.length && !downloads.length && !recent.length)
     html = `<div class="empty"><p>Play a talk and it’ll appear here to pick up where you left off.</p><p style="color:var(--text-3);font-size:14px;margin-top:6px">As you listen, a personalized “For you” row appears here.</p></div>`;
   $('homeContent').innerHTML = html;
   if (foryou.length)
@@ -271,6 +346,7 @@ async function loadListenNow() {
       const e = cont[Number(el.dataset.i)];
       el.addEventListener('click', () => playTalk(e, e.pIdx));
     });
+  if (downloads.length) bindTalkRows(document.getElementById('dlTalks'), downloads);
   if (recent.length) bindTalkRows(document.getElementById('recentTalks'), recent);
 }
 
@@ -437,7 +513,7 @@ function playTrack(it) {
     tracks: parts.map((x) => ({ id: x.id, title: x.partTitle, trackNo: x.trackNo, duration: x.duration })),
   };
   if (switching) {
-    audio.src = `/api/stream/${encodeURIComponent(it.id)}`;
+    audio.src = dlUrls[it.id] || `/api/stream/${encodeURIComponent(it.id)}`; // play offline copy if downloaded
     audio.load();
     const resume = loadPos(it.id);
     if (resume > 5) audio.addEventListener('loadedmetadata', function once() {
@@ -464,6 +540,7 @@ function paintNowPlaying(it) {
   $('nowTitle').innerHTML = `<span class="mqt">${escapeHtml(it.talkTitle)}</span>`;
   $('nowSpeaker').textContent = sub;
   setFavIcon(isFav(it.talkId));
+  updateDlBtn(it.talkId);
   requestAnimationFrame(setupMarquee);
   $('miniArt').style.background = g; $('miniArt').textContent = initials(it.speaker || it.talkTitle);
   $('miniTitle').textContent = it.talkTitle; $('miniSpeaker').textContent = sub;
@@ -578,6 +655,40 @@ $('favBtn').addEventListener('click', () => {
   if (!state.currentTalk) return;
   setFavIcon(toggleFav(state.currentTalk));
   if (state.view === 'home' && state.activeTab === 'favorites') loadFavorites();
+});
+
+// Download button (offline)
+function updateDlBtn(talkId) {
+  const b = $('dlBtn');
+  if (talkId && isDownloaded(talkId)) { b.innerHTML = DL_DONE_IC; b.classList.add('on'); b.classList.remove('busy'); }
+  else { b.innerHTML = DL_IC; b.classList.remove('on', 'busy'); }
+}
+function setDlBusy(frac) {
+  const b = $('dlBtn');
+  b.classList.add('busy'); b.classList.remove('on');
+  b.innerHTML = `<span class="dl-pct">${Math.round(frac * 100)}%</span>`;
+}
+$('dlBtn').addEventListener('click', async () => {
+  const talk = state.currentTalk;
+  if (!talk) return;
+  if ($('dlBtn').classList.contains('busy')) return;
+  if (isDownloaded(talk.id)) {
+    await deleteDownload(talk.id);
+    updateDlBtn(talk.id);
+    showToast('Removed download');
+    if (state.view === 'home' && state.activeTab === 'listen') loadListenNow();
+    return;
+  }
+  try {
+    setDlBusy(0);
+    await downloadTalk(talk, (f) => setDlBusy(f));
+    updateDlBtn(talk.id);
+    showToast('Saved for offline');
+    if (state.view === 'home' && state.activeTab === 'listen') loadListenNow();
+  } catch (e) {
+    updateDlBtn(talk.id);
+    showToast('Download failed');
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -837,13 +948,17 @@ function handleDeepLink() {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
 async function boot() {
   updatePlayIcons();
   applyTheme();
   setFavIcon(false);
+  updateDlBtn(null);
   updateSleepBtn();
   $('clarityBtn').innerHTML = SPARK_IC;
   $('clarityBtn').classList.toggle('on', fx.on);
+  loadDownloadUrls(); // make offline copies ready for instant playback
   let cfg = { title: 'Holy Grail', gated: false, authed: true };
   try { cfg = await (await fetch('/api/config')).json(); } catch (e) {}
   state.appTitle = cfg.title;

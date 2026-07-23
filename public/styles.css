@@ -245,6 +245,8 @@ input[type="range"]::-moz-range-thumb { width: 15px; height: 15px; border: none;
 .pill:active { background: var(--surface-hover); }
 .pill-ic { display: grid; place-items: center; padding: 9px 13px; min-width: 44px; }
 .pill.on { color: var(--accent); border-color: var(--accent); }
+.pill.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.dl-pct { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .pill svg { display: block; }
 .sleep-menu { position: absolute; left: 50%; bottom: 116px; transform: translateX(-50%); width: 230px;
   background: var(--mini-bg); backdrop-filter: blur(26px) saturate(1.4); border: 1px solid var(--line);
