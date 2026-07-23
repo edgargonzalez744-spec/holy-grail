@@ -30,11 +30,13 @@ const RECENT_DAYS = Number(process.env.RECENT_DAYS || 30);
 
 const AUDIO_RE = /(^audio\/)|(video\/mp4)|(mpeg)/i;
 // Groups shown first, in this order; any others appended after.
-const PREFERRED_GROUPS = ['BWW', 'Amway', 'WWDB', 'Yager Group', 'Day One'];
+const PREFERRED_GROUPS = ['BWW', 'Amway', 'WWDB', 'Yager Group']; // shown first, in this order
+const DEFERRED_GROUPS = ['Day One']; // pushed to the very end
 // Smart collections: talks whose TITLE matches are gathered into a tab
 // (non-destructive — the talk still lives under its speaker/group too).
+// `after` anchors the tab right after a given group.
 const COLLECTIONS = [
-  { key: 'women', label: "Women's Leadership", re: /\b(wom[ae]n|ladies|lady)\b/i },
+  { key: 'women', label: "Women's Leadership", re: /\b(wom[ae]n|ladies|lady)\b/i, after: 'Yager Group' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -210,7 +212,10 @@ async function buildIndex() {
   const groupList = [...groups.keys()];
   const groupOrder = [
     ...PREFERRED_GROUPS.filter((g) => groups.has(g)),
-    ...groupList.filter((g) => !PREFERRED_GROUPS.includes(g)).sort((a, b) => groupTalkCount(groups.get(b)) - groupTalkCount(groups.get(a))),
+    ...groupList
+      .filter((g) => !PREFERRED_GROUPS.includes(g) && !DEFERRED_GROUPS.includes(g))
+      .sort((a, b) => groupTalkCount(groups.get(b)) - groupTalkCount(groups.get(a))),
+    ...DEFERRED_GROUPS.filter((g) => groups.has(g)),
   ];
 
   const recent = [...talksById.values()].filter((t) => t.createdTime).sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
@@ -314,7 +319,7 @@ app.get('/api/groups', requireAuth, (req, res) => {
       return { name, speakerCount: g.speakers.size, talkCount: groupTalkCount(g) };
     }),
     collections: COLLECTIONS
-      .map((c) => ({ key: c.key, label: c.label, count: collectionTalks(c.re).length }))
+      .map((c) => ({ key: c.key, label: c.label, after: c.after || null, count: collectionTalks(c.re).length }))
       .filter((c) => c.count > 0),
   });
 });

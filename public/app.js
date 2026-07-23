@@ -131,12 +131,20 @@ async function loadTabs() {
   $('indexing').classList.add('hidden');
   state.recentDays = data.recentDays;
   state.recentCount = data.recentCount;
-  state.tabs = [
-    { key: 'listen', label: 'Listen Now' },
-    { key: 'favorites', label: 'Favorites' },
-  ]
-    .concat((data.collections || []).map((c) => ({ key: 'col:' + c.key, label: c.label })))
-    .concat(data.groups.map((g) => ({ key: 'group:' + g.name, label: g.name })));
+  // Collections anchored after a group are inserted right after that group tab;
+  // unanchored ones sit right after Favorites.
+  const cols = data.collections || [];
+  const afterMap = {};
+  const floating = [];
+  cols.forEach((c) => { if (c.after) (afterMap[c.after] = afterMap[c.after] || []).push(c); else floating.push(c); });
+  const groupTabs = [];
+  data.groups.forEach((g) => {
+    groupTabs.push({ key: 'group:' + g.name, label: g.name });
+    (afterMap[g.name] || []).forEach((c) => groupTabs.push({ key: 'col:' + c.key, label: c.label }));
+  });
+  state.tabs = [{ key: 'listen', label: 'Listen Now' }, { key: 'favorites', label: 'Favorites' }]
+    .concat(floating.map((c) => ({ key: 'col:' + c.key, label: c.label })))
+    .concat(groupTabs);
   // Land on Listen Now only if it has something to show; otherwise open the first group.
   if (state.activeTab === 'listen' && !getContinue().length && data.recentCount === 0 && data.groups.length)
     state.activeTab = 'group:' + data.groups[0].name;
